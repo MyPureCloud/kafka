@@ -40,7 +40,7 @@ class SimpleConsumer(val host: String,
   private var isClosed = false
 
   private def connect(): BlockingChannel = {
-    close
+    debug("Connecting to " + formatAddress(host, port))
     blockingChannel.connect()
     blockingChannel
   }
@@ -65,23 +65,25 @@ class SimpleConsumer(val host: String,
   private def sendRequest(request: RequestOrResponse): Receive = {
     lock synchronized {
       var response: Receive = null
-      try {
-        getOrMakeConnection()
-        blockingChannel.send(request)
-        response = blockingChannel.receive()
-      } catch {
-        case e : Throwable =>
-          info("Reconnect due to socket error: %s".format(e.toString))
-          // retry once
-          try {
-            reconnect()
-            blockingChannel.send(request)
-            response = blockingChannel.receive()
-          } catch {
-            case e: Throwable =>
-              disconnect()
-              throw e
-          }
+      if (!isClosed) {
+        try {
+          getOrMakeConnection()
+          blockingChannel.send(request)
+          response = blockingChannel.receive()
+        } catch {
+          case e: Throwable =>
+            info("Reconnect due to socket error: %s".format(e.toString))
+            // retry once
+            try {
+              reconnect()
+              blockingChannel.send(request)
+              response = blockingChannel.receive()
+            } catch {
+              case e: Throwable =>
+                disconnect()
+                throw e
+            }
+        }
       }
       response
     }

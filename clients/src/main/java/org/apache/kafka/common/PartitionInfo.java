@@ -69,10 +69,11 @@ public class PartitionInfo {
 
     @Override
     public String toString() {
+        int leaderId = leader == null ? -1 : leader.id();
         return String.format("Partition(topic = %s, partition = %d, leader = %d, replicas = %s, isr = %s",
                              topic,
                              partition,
-                             leader.id(),
+                             leaderId,
                              fmtNodeIds(replicas),
                              fmtNodeIds(inSyncReplicas));
     }
