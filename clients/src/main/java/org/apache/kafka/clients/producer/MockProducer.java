@@ -24,9 +24,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.kafka.clients.producer.internals.FutureRecordMetadata;
-import org.apache.kafka.clients.producer.internals.Partitioner;
+import org.apache.kafka.clients.producer.internals.DefaultPartitioner;
 import org.apache.kafka.clients.producer.internals.ProduceRequestResult;
 import org.apache.kafka.common.*;
 
@@ -37,10 +38,10 @@ import org.apache.kafka.common.*;
  * By default this mock will synchronously complete each send call successfully. However it can be configured to allow
  * the user to control the completion of the call and supply an optional error for the producer to throw.
  */
-public class MockProducer implements Producer<byte[],byte[]> {
+public class MockProducer implements Producer<byte[], byte[]> {
 
     private final Cluster cluster;
-    private final Partitioner partitioner = new Partitioner();
+    private final Partitioner partitioner = new DefaultPartitioner();
     private final List<ProducerRecord<byte[], byte[]>> sent;
     private final Deque<Completion> completions;
     private boolean autoComplete;
@@ -48,7 +49,7 @@ public class MockProducer implements Producer<byte[],byte[]> {
 
     /**
      * Create a mock producer
-     * 
+     *
      * @param cluster The cluster holding metadata for this producer
      * @param autoComplete If true automatically complete all requests successfully and execute the callback. Otherwise
      *        the user must call {@link #completeNext()} or {@link #errorNext(RuntimeException)} after
@@ -65,7 +66,7 @@ public class MockProducer implements Producer<byte[],byte[]> {
 
     /**
      * Create a new mock producer with invented metadata the given autoComplete setting.
-     * 
+     *
      * Equivalent to {@link #MockProducer(Cluster, boolean) new MockProducer(null, autoComplete)}
      */
     public MockProducer(boolean autoComplete) {
@@ -74,7 +75,7 @@ public class MockProducer implements Producer<byte[],byte[]> {
 
     /**
      * Create a new auto completing mock producer
-     * 
+     *
      * Equivalent to {@link #MockProducer(boolean) new MockProducer(true)}
      */
     public MockProducer() {
@@ -93,14 +94,14 @@ public class MockProducer implements Producer<byte[],byte[]> {
 
     /**
      * Adds the record to the list of sent records.
-     * 
+     *
      * @see #history()
      */
     @Override
-    public synchronized Future<RecordMetadata> send(ProducerRecord<byte[],byte[]> record, Callback callback) {
+    public synchronized Future<RecordMetadata> send(ProducerRecord<byte[], byte[]> record, Callback callback) {
         int partition = 0;
         if (this.cluster.partitionsForTopic(record.topic()) != null)
-            partition = partitioner.partition(record, this.cluster);
+            partition = partition(record, this.cluster);
         ProduceRequestResult result = new ProduceRequestResult();
         FutureRecordMetadata future = new FutureRecordMetadata(result, 0);
         TopicPartition topicPartition = new TopicPartition(record.topic(), partition);
@@ -127,6 +128,11 @@ public class MockProducer implements Producer<byte[],byte[]> {
             this.offsets.put(tp, next);
             return offset;
         }
+    }
+
+    public synchronized void flush() {
+        while (!this.completions.isEmpty())
+            completeNext();
     }
 
     public List<PartitionInfo> partitionsFor(String topic) {
@@ -158,7 +164,7 @@ public class MockProducer implements Producer<byte[],byte[]> {
 
     /**
      * Complete the earliest uncompleted call successfully.
-     * 
+     *
      * @return true if there was an uncompleted call to complete
      */
     public synchronized boolean completeNext() {
@@ -167,7 +173,7 @@ public class MockProducer implements Producer<byte[],byte[]> {
 
     /**
      * Complete the earliest uncompleted call with the given error.
-     * 
+     *
      * @return true if there was an uncompleted call to complete
      */
     public synchronized boolean errorNext(RuntimeException e) {
@@ -179,6 +185,26 @@ public class MockProducer implements Producer<byte[],byte[]> {
             return false;
         }
     }
+
+    /**
+     * computes partition for given record.
+     */
+    private int partition(ProducerRecord<byte[], byte[]> record, Cluster cluster) {
+        Integer partition = record.partition();
+        if (partition != null) {
+            List<PartitionInfo> partitions = cluster.partitionsForTopic(record.topic());
+            int numPartitions = partitions.size();
+            // they have given us a partition, use it
+            if (partition < 0 || partition >= numPartitions)
+                throw new IllegalArgumentException("Invalid partition given with record: " + partition
+                                                   + " is not in the range [0..."
+                                                   + numPartitions
+                                                   + "].");
+            return partition;
+        }
+        return this.partitioner.partition(record.topic(), null, record.key(), null, record.value(), cluster);
+    }
+
 
     private static class Completion {
         private final long offset;

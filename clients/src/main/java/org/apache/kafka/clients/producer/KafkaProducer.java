@@ -21,7 +21,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.kafka.clients.NetworkClient;
 import org.apache.kafka.clients.producer.internals.Metadata;
-import org.apache.kafka.clients.producer.internals.Partitioner;
 import org.apache.kafka.clients.producer.internals.RecordAccumulator;
 import org.apache.kafka.clients.producer.internals.Sender;
 import org.apache.kafka.common.Cluster;
@@ -169,7 +168,7 @@ public class KafkaProducer<K,V> implements Producer<K,V> {
                                                                         MetricsReporter.class);
         reporters.add(new JmxReporter(jmxPrefix));
         this.metrics = new Metrics(metricConfig, reporters, time);
-        this.partitioner = new Partitioner();
+        this.partitioner = config.getConfiguredInstance(ProducerConfig.PARTITIONER_CLASS_CONFIG, Partitioner.class);
         long retryBackoffMs = config.getLong(ProducerConfig.RETRY_BACKOFF_MS_CONFIG);
         this.metadataFetchTimeoutMs = config.getLong(ProducerConfig.METADATA_FETCH_TIMEOUT_CONFIG);
         this.metadata = new Metadata(retryBackoffMs, config.getLong(ProducerConfig.METADATA_MAX_AGE_CONFIG));
@@ -330,7 +329,7 @@ public class KafkaProducer<K,V> implements Producer<K,V> {
                         " specified in value.serializer");
             }
             ProducerRecord<byte[], byte[]> serializedRecord = new ProducerRecord<byte[], byte[]>(record.topic(), record.partition(), serializedKey, serializedValue);
-            int partition = partitioner.partition(serializedRecord, metadata.fetch());
+            int partition = partition(record, serializedKey, serializedValue, metadata.fetch());
             int serializedSize = Records.LOG_OVERHEAD + Record.recordSize(serializedKey, serializedValue);
             ensureValidRecordSize(serializedSize);
             TopicPartition tp = new TopicPartition(record.topic(), partition);
@@ -427,6 +426,27 @@ public class KafkaProducer<K,V> implements Producer<K,V> {
         this.keySerializer.close();
         this.valueSerializer.close();
         log.debug("The Kafka producer has closed.");
+    }
+
+    /**
+     * computes partition for given record.
+     * if the record has partition returns the value otherwise
+     * calls configured partitioner class to compute the partition.
+     */
+    private int partition(ProducerRecord<K, V> record, byte[] serializedKey , byte[] serializedValue, Cluster cluster) {
+        Integer partition = record.partition();
+        if (partition != null) {
+            List<PartitionInfo> partitions = cluster.partitionsForTopic(record.topic());
+            int numPartitions = partitions.size();
+            // they have given us a partition, use it
+            if (partition < 0 || partition >= numPartitions)
+                throw new IllegalArgumentException("Invalid partition given with record: " + partition
+                                                   + " is not in the range [0..."
+                                                   + numPartitions
+                                                   + "].");
+            return partition;
+        }
+        return this.partitioner.partition(record.topic(), record.key(), serializedKey, record.value(), serializedValue, cluster);
     }
 
     private static class FutureFailure implements Future<RecordMetadata> {

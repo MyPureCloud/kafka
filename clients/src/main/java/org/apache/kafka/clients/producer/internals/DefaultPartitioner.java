@@ -17,14 +17,14 @@
 package org.apache.kafka.clients.producer.internals;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.clients.producer.Partitioner;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.utils.Utils;
-
 
 /**
  * The default partitioning strategy:
@@ -33,41 +33,57 @@ import org.apache.kafka.common.utils.Utils;
  * <li>If no partition is specified but a key is present choose a partition based on a hash of the key
  * <li>If no partition or key is present choose a partition in a round-robin fashion
  */
-public class Partitioner {
+public class DefaultPartitioner implements Partitioner {
 
     private final AtomicInteger counter = new AtomicInteger(new Random().nextInt());
 
     /**
+     * A cheap way to deterministically convert a number to a positive value. When the input is
+     * positive, the original value is returned. When the input number is negative, the returned
+     * positive value is the original value bit AND against 0x7fffffff which is not its absolutely
+     * value.
+     *
+     * Note: changing this method in the future will possibly cause partition selection not to be
+     * compatible with the existing messages already placed on a partition.
+     *
+     * @param number a given number
+     * @return a positive number.
+     */
+    private static int toPositive(int number) {
+        return number & 0x7fffffff;
+    }
+
+    public void configure(Map<String, ?> configs) {}
+
+    /**
      * Compute the partition for the given record.
-     * 
-     * @param record The record being sent
+     *
+     * @param topic The topic name
+     * @param key The key to partition on (or null if no key)
+     * @param keyBytes serialized key to partition on (or null if no key)
+     * @param value The value to partition on or null
+     * @param valueBytes serialized value to partition on or null
      * @param cluster The current cluster metadata
      */
-    public int partition(ProducerRecord<byte[], byte[]> record, Cluster cluster) {
-        List<PartitionInfo> partitions = cluster.partitionsForTopic(record.topic());
+    public int partition(String topic, Object key, byte[] keyBytes, Object value, byte[] valueBytes, Cluster cluster) {
+        List<PartitionInfo> partitions = cluster.partitionsForTopic(topic);
         int numPartitions = partitions.size();
-        if (record.partition() != null) {
-            // they have given us a partition, use it
-            if (record.partition() < 0 || record.partition() >= numPartitions)
-                throw new IllegalArgumentException("Invalid partition given with record: " + record.partition()
-                                                   + " is not in the range [0..."
-                                                   + numPartitions
-                                                   + "].");
-            return record.partition();
-        } else if (record.key() == null) {
+        if (keyBytes == null) {
             int nextValue = counter.getAndIncrement();
-            List<PartitionInfo> availablePartitions = cluster.availablePartitionsForTopic(record.topic());
+            List<PartitionInfo> availablePartitions = cluster.availablePartitionsForTopic(topic);
             if (availablePartitions.size() > 0) {
-                int part = Utils.abs(nextValue) % availablePartitions.size();
+                int part = DefaultPartitioner.toPositive(nextValue) % availablePartitions.size();
                 return availablePartitions.get(part).partition();
             } else {
                 // no partitions are available, give a non-available partition
-                return Utils.abs(nextValue) % numPartitions;
+                return DefaultPartitioner.toPositive(nextValue) % numPartitions;
             }
         } else {
-            // hash the key to choose a partition
-            return Utils.abs(Utils.murmur2(record.key())) % numPartitions;
+            // hash the keyBytes to choose a partition
+            return DefaultPartitioner.toPositive(Utils.murmur2(keyBytes)) % numPartitions;
         }
     }
+
+    public void close() {}
 
 }
