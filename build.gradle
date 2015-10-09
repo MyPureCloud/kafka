@@ -31,6 +31,7 @@ allprojects {
 
 ext {
     gradleVersion = "2.0"
+    skipSigning = false
 }
 
 def isVerificationRequired(project) {
@@ -52,6 +53,7 @@ subprojects {
   uploadArchives {
     repositories {
       signing {
+          required { !skipSigning }
           if (isVerificationRequired(project)) {
               sign configurations.archives
 
