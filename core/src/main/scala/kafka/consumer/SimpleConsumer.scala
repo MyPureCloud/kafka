@@ -76,7 +76,7 @@ class SimpleConsumer(val host: String,
         } catch {
           case e : ClosedByInterruptException =>
             throw e
-          case e: Throwable =>
+          case e : Throwable =>
             info("Reconnect due to socket error: %s".format(e.toString))
             // retry once
             try {
