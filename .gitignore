@@ -21,3 +21,4 @@ TAGS
 .gradle
 kafka.ipr
 kafka.iws
+core/data/
