@@ -324,7 +324,7 @@ public class NetworkClient implements KafkaClient {
      */
     private void handleDisconnections(List<ClientResponse> responses, long now) {
         for (int node : this.selector.disconnected()) {
-            connectionStates.disconnected(node);
+            connectionStates.disconnected(node, now);
             log.debug("Node {} disconnected.", node);
             for (ClientRequest request : this.inFlightRequests.clearAll(node)) {
                 log.trace("Cancelled request {} due to node {} being disconnected", request, node);
@@ -417,7 +417,7 @@ public class NetworkClient implements KafkaClient {
             selector.connect(node.id(), new InetSocketAddress(node.host(), node.port()), this.socketSendBuffer, this.socketReceiveBuffer);
         } catch (IOException e) {
             /* attempt failed, we'll try again after the backoff */
-            connectionStates.disconnected(node.id());
+            connectionStates.disconnected(node.id(), now);
             /* maybe the problem is our metadata, update it */
             metadata.requestUpdate();
             log.debug("Error connecting to node {} at {}:{}:", node.id(), node.host(), node.port(), e);

@@ -116,8 +116,9 @@ final class ClusterConnectionStates {
      * Enter the disconnected state for the given node
      * @param node The node we have disconnected from
      */
-    public void disconnected(int node) {
+    public void disconnected(int node, long now) {
         nodeState(node).state = ConnectionState.DISCONNECTED;
+        nodeState(node).lastConnectAttemptMs = now;
     }
 
     /**
