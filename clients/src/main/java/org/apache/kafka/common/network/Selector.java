@@ -116,11 +116,12 @@ public class Selector implements Selectable {
      * @param address The address to connect to
      * @param sendBufferSize The send buffer for the new connection
      * @param receiveBufferSize The receive buffer for the new connection
+     * @param socketTimeout socket timeout in milliseconds
      * @throws IllegalStateException if there is already a connection for that id
      * @throws IOException if DNS resolution fails on the hostname or if the broker is down
      */
     @Override
-    public void connect(int id, InetSocketAddress address, int sendBufferSize, int receiveBufferSize) throws IOException {
+    public void connect(int id, InetSocketAddress address, int sendBufferSize, int receiveBufferSize, int socketTimeout) throws IOException {
         if (this.keys.containsKey(id))
             throw new IllegalStateException("There is already a connection for id " + id);
 
@@ -131,6 +132,7 @@ public class Selector implements Selectable {
         socket.setSendBufferSize(sendBufferSize);
         socket.setReceiveBufferSize(receiveBufferSize);
         socket.setTcpNoDelay(true);
+        socket.setSoTimeout(socketTimeout);
         try {
             channel.connect(address);
         } catch (UnresolvedAddressException e) {

@@ -43,7 +43,7 @@ public class MockSelector implements Selectable {
     }
 
     @Override
-    public void connect(int id, InetSocketAddress address, int sendBufferSize, int receiveBufferSize) throws IOException {
+    public void connect(int id, InetSocketAddress address, int sendBufferSize, int receiveBufferSize, int socketConnection) throws IOException {
         this.connected.add(id);
     }
 

@@ -80,13 +80,17 @@ public class NetworkClient implements KafkaClient {
     /* the last timestamp when no broker node is available to connect */
     private long lastNoNodeAvailableMs;
 
+    /* socket timeout for the connections to the brokers */
+    private int socketTimeout;
+
     public NetworkClient(Selectable selector,
                          Metadata metadata,
                          String clientId,
                          int maxInFlightRequestsPerConnection,
                          long reconnectBackoffMs,
                          int socketSendBuffer,
-                         int socketReceiveBuffer) {
+                         int socketReceiveBuffer,
+                         int socketTimeout) {
         this.selector = selector;
         this.metadata = metadata;
         this.clientId = clientId;
@@ -98,6 +102,7 @@ public class NetworkClient implements KafkaClient {
         this.nodeIndexOffset = new Random().nextInt(Integer.MAX_VALUE);
         this.metadataFetchInProgress = false;
         this.lastNoNodeAvailableMs = 0;
+        this.socketTimeout = socketTimeout;
     }
 
     /**
@@ -414,7 +419,7 @@ public class NetworkClient implements KafkaClient {
         try {
             log.debug("Initiating connection to node {} at {}:{}.", node.id(), node.host(), node.port());
             this.connectionStates.connecting(node.id(), now);
-            selector.connect(node.id(), new InetSocketAddress(node.host(), node.port()), this.socketSendBuffer, this.socketReceiveBuffer);
+            selector.connect(node.id(), new InetSocketAddress(node.host(), node.port()), this.socketSendBuffer, this.socketReceiveBuffer, this.socketTimeout);
         } catch (IOException e) {
             /* attempt failed, we'll try again after the backoff */
             connectionStates.disconnected(node.id(), now);

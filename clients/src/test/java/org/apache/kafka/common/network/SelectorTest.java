@@ -43,6 +43,7 @@ public class SelectorTest {
 
     private static final List<NetworkSend> EMPTY = new ArrayList<NetworkSend>();
     private static final int BUFFER_SIZE = 4 * 1024;
+    private static final int SOCKET_TIMEOUT = 120*1000;
 
     private EchoServer server;
     private Selectable selector;
@@ -120,7 +121,7 @@ public class SelectorTest {
      */
     @Test(expected = IOException.class)
     public void testNoRouteToHost() throws Exception {
-        selector.connect(0, new InetSocketAddress("asdf.asdf.dsc", server.port), BUFFER_SIZE, BUFFER_SIZE);
+        selector.connect(0, new InetSocketAddress("asdf.asdf.dsc", server.port), BUFFER_SIZE, BUFFER_SIZE, SOCKET_TIMEOUT);
     }
 
     /**
@@ -129,7 +130,7 @@ public class SelectorTest {
     @Test
     public void testConnectionRefused() throws Exception {
         int node = 0;
-        selector.connect(node, new InetSocketAddress("localhost", TestUtils.choosePort()), BUFFER_SIZE, BUFFER_SIZE);
+        selector.connect(node, new InetSocketAddress("localhost", TestUtils.choosePort()), BUFFER_SIZE, BUFFER_SIZE, SOCKET_TIMEOUT);
         while (selector.disconnected().contains(node))
             selector.poll(1000L, EMPTY);
     }
@@ -146,7 +147,7 @@ public class SelectorTest {
         // create connections
         InetSocketAddress addr = new InetSocketAddress("localhost", server.port);
         for (int i = 0; i < conns; i++)
-            selector.connect(i, addr, BUFFER_SIZE, BUFFER_SIZE);
+            selector.connect(i, addr, BUFFER_SIZE, BUFFER_SIZE, SOCKET_TIMEOUT);
 
         // send echo requests and receive responses
         int[] requests = new int[conns];
@@ -224,7 +225,7 @@ public class SelectorTest {
 
     /* connect and wait for the connection to complete */
     private void blockingConnect(int node) throws IOException {
-        selector.connect(node, new InetSocketAddress("localhost", server.port), BUFFER_SIZE, BUFFER_SIZE);
+        selector.connect(node, new InetSocketAddress("localhost", server.port), BUFFER_SIZE, BUFFER_SIZE, SOCKET_TIMEOUT);
         while (!selector.connected().contains(node))
             selector.poll(10000L, EMPTY);
     }

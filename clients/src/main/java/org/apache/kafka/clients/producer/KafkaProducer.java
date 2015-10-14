@@ -194,7 +194,8 @@ public class KafkaProducer<K,V> implements Producer<K,V> {
                                                  config.getInt(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION),
                                                  config.getLong(ProducerConfig.RECONNECT_BACKOFF_MS_CONFIG),
                                                  config.getInt(ProducerConfig.SEND_BUFFER_CONFIG),
-                                                 config.getInt(ProducerConfig.RECEIVE_BUFFER_CONFIG));
+                                                 config.getInt(ProducerConfig.RECEIVE_BUFFER_CONFIG),
+                                                 config.getInt(ProducerConfig.TIMEOUT_CONFIG));
         this.sender = new Sender(client,
                                  this.metadata,
                                  this.accumulator,

@@ -31,9 +31,10 @@ public interface Selectable {
      * @param address The address to connect to
      * @param sendBufferSize The send buffer for the socket
      * @param receiveBufferSize The receive buffer for the socket
+     * @param socketTimeout socket timeout in milliseconds
      * @throws IOException If we cannot begin connecting
      */
-    public void connect(int id, InetSocketAddress address, int sendBufferSize, int receiveBufferSize) throws IOException;
+    public void connect(int id, InetSocketAddress address, int sendBufferSize, int receiveBufferSize, int socketTimeout) throws IOException;
 
     /**
      * Begin disconnecting the connection identified by the given id
