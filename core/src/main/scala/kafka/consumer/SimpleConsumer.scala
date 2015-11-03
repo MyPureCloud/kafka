@@ -18,7 +18,7 @@
 package kafka.consumer
 
 
-import java.nio.channels.{ClosedChannelException, ClosedByInterruptException}
+import java.nio.channels.ClosedByInterruptException
 
 import kafka.api._
 import kafka.network._
@@ -40,7 +40,6 @@ class SimpleConsumer(val host: String,
   private val lock = new Object()
   private val blockingChannel = new BlockingChannel(host, port, bufferSize, BlockingChannel.UseDefaultBufferSize, soTimeout)
   private val fetchRequestAndResponseStats = FetchRequestAndResponseStatsRegistry.getFetchRequestAndResponseStats(clientId)
-  private var isClosed = false
 
   private def connect(): BlockingChannel = {
     debug("Connecting to " + formatAddress(host, port))
@@ -61,14 +60,13 @@ class SimpleConsumer(val host: String,
   def close() {
     lock synchronized {
       disconnect()
-      isClosed = true
     }
   }
   
   private def sendRequest(request: RequestOrResponse): Receive = {
     lock synchronized {
-
-      if (!isClosed) {
+      // The JVM documentation is not clear on whether synchronized throws InterruptedException, so check interrupted here:
+      if (!Thread.interrupted()) {
         var response: Receive = null
         try {
           getOrMakeConnection()
@@ -92,7 +90,7 @@ class SimpleConsumer(val host: String,
         }
         response
       } else {
-        throw new ClosedChannelException()
+        throw new InterruptedException()
       }
     }
   }
@@ -157,7 +155,7 @@ class SimpleConsumer(val host: String,
   def fetchOffsets(request: OffsetFetchRequest) = OffsetFetchResponse.readFrom(sendRequest(request).buffer)
 
   private def getOrMakeConnection() {
-    if(!isClosed && !blockingChannel.isConnected) {
+    if(!blockingChannel.isConnected) {
       connect()
     }
   }
