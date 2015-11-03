@@ -18,7 +18,7 @@
 package kafka.consumer
 
 
-import java.nio.channels.ClosedByInterruptException
+import java.nio.channels.{ClosedChannelException, ClosedByInterruptException}
 
 import kafka.api._
 import kafka.network._
@@ -67,8 +67,9 @@ class SimpleConsumer(val host: String,
   
   private def sendRequest(request: RequestOrResponse): Receive = {
     lock synchronized {
-      var response: Receive = null
+
       if (!isClosed) {
+        var response: Receive = null
         try {
           getOrMakeConnection()
           blockingChannel.send(request)
@@ -89,8 +90,10 @@ class SimpleConsumer(val host: String,
                 throw e
             }
         }
+        response
+      } else {
+        throw new ClosedChannelException()
       }
-      response
     }
   }
 
