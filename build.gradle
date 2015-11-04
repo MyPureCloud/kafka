@@ -43,11 +43,15 @@ apply from: file('gradle/license.gradle')
 apply from: file('scala.gradle')
 
 def getMavenServer(path, id) {
-  File file = new File(path)
-  def xmlSlurper = new XmlSlurper()
-  def settings = xmlSlurper.parse(file)
-  def servers = settings.servers.server
-  servers.find { it.id == id }
+    try {
+        File file = new File(path)
+        def xmlSlurper = new XmlSlurper()
+        def settings = xmlSlurper.parse(file)
+        def servers = settings.servers.server
+        servers.find { it.id == id }
+    } catch (Exception) {
+        null
+    }
 }
 
 def server = getMavenServer(mavenSettings, mavenId)
