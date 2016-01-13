@@ -207,6 +207,11 @@ class FetchRequestBuilder() {
   }
 
   def build() = {
+    // work around for storm consumer that erroneously leaves minBytes as 0 which defeats the long polling:
+    if (maxWait > 0 && minBytes == 0) {
+      minBytes = 1
+    }
+
     val fetchRequest = FetchRequest(versionId, correlationId.getAndIncrement, clientId, replicaId, maxWait, minBytes, requestMap.toMap)
     requestMap.clear()
     fetchRequest

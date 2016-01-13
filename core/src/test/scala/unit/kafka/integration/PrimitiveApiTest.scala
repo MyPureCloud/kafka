@@ -63,8 +63,18 @@ class PrimitiveApiTest extends JUnit3Suite with ProducerConsumerTestHarness with
   def testEmptyFetchRequest() {
     val partitionRequests = immutable.Map[TopicAndPartition, PartitionFetchInfo]()
     val request = new FetchRequest(requestInfo = partitionRequests)
+    assertEquals(0, request.minBytes)
     val fetched = consumer.fetch(request)
     assertTrue(!fetched.hasError && fetched.data.size == 0)
+  }
+
+  def testMaxWaitWithoutMinBytes(): Unit = {
+    val request = new FetchRequestBuilder()
+      .clientId("test-client")
+      .maxWait(1000)
+      .addFetch("topic1", 0, 0, 10000)
+      .build()
+    assertEquals(1, request.minBytes)
   }
 
   def testDefaultEncoderProducerAndFetch() {
