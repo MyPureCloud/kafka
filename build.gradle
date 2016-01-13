@@ -79,6 +79,8 @@ ext {
   mavenUrl = project.hasProperty('mavenUrl') ? project.mavenUrl : ''
   mavenUsername = project.hasProperty('mavenUsername') ? project.mavenUsername : ''
   mavenPassword = project.hasProperty('mavenPassword') ? project.mavenPassword : ''
+  mavenSettings = project.hasProperty('mavenSettings') ? project.mavenSettings : ''
+  mavenId = project.hasProperty('mavenId') ? project.mavenId : ''
 
   userShowStandardStreams = project.hasProperty("showStandardStreams") ? showStandardStreams : null
 
@@ -109,6 +111,26 @@ if (new File('.git').exists()) {
   }
 }
 
+def getMavenServer(path, id) {
+  try {
+    File file = new File(path)
+    def xmlSlurper = new XmlSlurper()
+    def settings = xmlSlurper.parse(file)
+    def servers = settings.servers.server
+    servers.find { it.id == id }
+  } catch (Exception) {
+    null
+  }
+}
+
+def server = getMavenServer(mavenSettings, mavenId)
+def mavenUsernameSetting = mavenUsername
+def mavenPasswordSetting = mavenPassword
+if (server != null) {
+  mavenUsernameSetting = server.username
+  mavenPasswordSetting = server.password
+}
+
 subprojects {
   apply plugin: 'java'
   apply plugin: 'maven'
@@ -133,7 +155,7 @@ subprojects {
           mavenDeployer {
               beforeDeployment { MavenDeployment deployment -> signing.signPom(deployment) }
               repository(url: "${mavenUrl}") {
-                  authentication(userName: "${mavenUsername}", password: "${mavenPassword}")
+                authentication(userName: mavenUsernameSetting, password: mavenPasswordSetting)
               }
               afterEvaluate {
                   pom.artifactId = "${archivesBaseName}"
