@@ -152,6 +152,20 @@ public class NetworkClientTest {
     }
 
     @Test
+    public void testConnectionTimeout() {
+        selector.mockConnectingNode(node.idString());
+
+        assertFalse(client.ready(node, time.milliseconds()));
+
+        time.sleep(4000);
+        client.poll(3000, time.milliseconds());
+
+        assertEquals(1, selector.disconnected().size());
+        String disconnectedNode = selector.disconnected().get(0);
+        assertEquals(node.idString(), disconnectedNode);
+    }
+
+    @Test
     public void testLeastLoadedNode() {
         Node leastNode = null;
         client.ready(node, time.milliseconds());
