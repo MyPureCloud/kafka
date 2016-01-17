@@ -12,7 +12,9 @@
  */
 package org.apache.kafka.clients;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -26,6 +28,19 @@ final class ClusterConnectionStates {
     public ClusterConnectionStates(long reconnectBackoffMs) {
         this.reconnectBackoffMs = reconnectBackoffMs;
         this.nodeState = new HashMap<String, NodeConnectionState>();
+    }
+
+    public List<String> getNodesWithTimedOutConnects(long now, int requestTimeout) {
+        List<String> result = new ArrayList<>();
+
+        for (Map.Entry<String, NodeConnectionState> entry : nodeState.entrySet()) {
+            long timeSinceConnectAttempt = now - entry.getValue().lastConnectAttemptMs;
+            if (entry.getValue().state == ConnectionState.CONNECTING && timeSinceConnectAttempt > requestTimeout) {
+                result.add(entry.getKey());
+            }
+        }
+
+        return result;
     }
 
     /**

@@ -34,14 +34,25 @@ public class MockSelector implements Selectable {
     private final List<NetworkReceive> completedReceives = new ArrayList<NetworkReceive>();
     private final List<String> disconnected = new ArrayList<String>();
     private final List<String> connected = new ArrayList<String>();
+    private final List<String> connecting = new ArrayList<String>();
 
     public MockSelector(Time time) {
         this.time = time;
     }
 
+    /**
+     * Causes node with given id to be treated as connecting rather
+     * than immediately going to connected.
+     */
+    public void mockConnectingNode(String id) {
+        this.connecting.add(id);
+    }
+
     @Override
     public void connect(String id, InetSocketAddress address, int sendBufferSize, int receiveBufferSize) throws IOException {
-        this.connected.add(id);
+        if (!this.connecting.contains(id)) {
+            this.connected.add(id);
+        }
     }
 
     @Override
@@ -61,6 +72,13 @@ public class MockSelector implements Selectable {
                 break;
             }
         }
+
+        for (int i = 0; i < this.connecting.size(); i++) {
+            if (this.connecting.get(i).equals(id)) {
+                this.connecting.remove(i);
+                break;
+            }
+        }
     }
 
     public void clear() {
@@ -68,6 +86,7 @@ public class MockSelector implements Selectable {
         this.completedReceives.clear();
         this.disconnected.clear();
         this.connected.clear();
+        this.connecting.clear();
     }
 
     @Override

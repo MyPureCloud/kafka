@@ -417,11 +417,14 @@ public class NetworkClient implements KafkaClient {
      * @param now The current time
      */
     private void handleTimedOutRequests(List<ClientResponse> responses, long now) {
-        List<String> nodeIds = this.inFlightRequests.getNodesWithTimedOutRequests(now, this.requestTimeoutMs);
+        Set<String> nodeIds = new HashSet<>();
+        nodeIds.addAll(this.inFlightRequests.getNodesWithTimedOutRequests(now, this.requestTimeoutMs));
+        nodeIds.addAll(this.connectionStates.getNodesWithTimedOutConnects(now, this.requestTimeoutMs));
+
         for (String nodeId : nodeIds) {
             // close connection to the node
             this.selector.close(nodeId);
-            log.debug("Disconnecting from node {} due to request timeout.", nodeId);
+            log.debug("Disconnecting from node {} due to request or connection timeout.", nodeId);
             processDisconnection(responses, nodeId, now);
         }
 
