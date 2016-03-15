@@ -519,12 +519,14 @@ object MirrorMaker extends Logging with KafkaMetricsGroup {
         consumer.subscribe(Pattern.compile(whitelistOpt.get), consumerRebalanceListener)
     }
 
-    // New consumer always hasNext
     override def hasData = true
 
     override def receive() : BaseConsumerRecord = {
-      while (recordIter == null || !recordIter.hasNext)
+      if (recordIter == null || !recordIter.hasNext) {
         recordIter = consumer.poll(1000).iterator
+        if (!recordIter.hasNext)
+          throw new ConsumerTimeoutException
+      }
 
       val record = recordIter.next()
       val tp = new TopicPartition(record.topic, record.partition)
@@ -555,7 +557,7 @@ object MirrorMaker extends Logging with KafkaMetricsGroup {
     override def onPartitionsRevoked(partitions: util.Collection[TopicPartition]) {
       producer.flush()
       commitOffsets(mirrorMakerConsumer)
-      customRebalanceListenerForNewConsumer.foreach(_.onPartitionsAssigned(partitions))
+      customRebalanceListenerForNewConsumer.foreach(_.onPartitionsRevoked(partitions))
     }
 
     override def onPartitionsAssigned(partitions: util.Collection[TopicPartition]) {

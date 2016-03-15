@@ -106,7 +106,7 @@ object TestUtils extends Logging {
     })
     f
   }
-  
+
   /**
    * Create a random log directory in the format <string>-<int> used for Kafka partition logs.
    * It is the responsibility of the caller to set up a shutdown hook for deletion of the directory.
@@ -215,6 +215,7 @@ object TestUtils extends Logging {
     props.put("controlled.shutdown.enable", enableControlledShutdown.toString)
     props.put("delete.topic.enable", enableDeleteTopic.toString)
     props.put("controlled.shutdown.retry.backoff.ms", "100")
+    props.put("log.cleaner.dedupe.buffer.size", "2097152")
 
     if (protocolAndPorts.exists { case (protocol, _) => usesSslTransportLayer(protocol) })
       props.putAll(sslConfigs(Mode.SERVER, true, trustStoreFile, s"server$nodeId"))
@@ -781,6 +782,16 @@ object TestUtils extends Logging {
       waitTime = timeout)
 
     leader
+  }
+
+  def waitUntilLeaderIsKnown(servers: Seq[KafkaServer], topic: String, partition: Int, timeout: Long = 5000L): Unit = {
+    TestUtils.waitUntilTrue(() => 
+      servers.exists { server =>
+        server.replicaManager.getPartition(topic, partition).exists(_.leaderReplicaIfLocal().isDefined)
+      },
+      "Partition [%s,%d] leaders not made yet after %d ms".format(topic, partition, timeout),
+      waitTime = timeout
+    )
   }
 
   def writeNonsenseToFile(fileName: File, position: Long, size: Int) {
