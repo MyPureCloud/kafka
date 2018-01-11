@@ -19,6 +19,7 @@ package org.apache.kafka.clients;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.network.ChannelState;
 import org.apache.kafka.common.network.NetworkReceive;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.types.Struct;
@@ -40,6 +41,7 @@ import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -190,6 +192,20 @@ public class NetworkClientTest {
         client.poll(3000, time.milliseconds());
         assertEquals(1, selector.disconnected().size());
         assertTrue("Node not found in disconnected map", selector.disconnected().containsKey(node.idString()));
+    }
+
+    @Test
+    public void testConnectionTimeout() {
+        selector.mockConnectingNode(node.idString());
+
+        assertFalse(client.ready(node, time.milliseconds()));
+
+        time.sleep(4000);
+        client.poll(3000, time.milliseconds());
+
+        assertEquals(1, selector.disconnected().size());
+        Map<String, ChannelState> disconnectedNode = selector.disconnected();
+        assertEquals(node.idString(), disconnectedNode.keySet().iterator().next());
     }
 
     @Test

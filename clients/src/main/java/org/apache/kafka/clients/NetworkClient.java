@@ -43,13 +43,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Map;
-import java.util.Random;
+import java.util.*;
 
 /**
  * A network client for asynchronous request/response network i/o. This is an internal class used to implement the
@@ -609,11 +603,14 @@ public class NetworkClient implements KafkaClient {
      * @param now The current time
      */
     private void handleTimedOutRequests(List<ClientResponse> responses, long now) {
-        List<String> nodeIds = this.inFlightRequests.getNodesWithTimedOutRequests(now, this.requestTimeoutMs);
+        Set<String> nodeIds = new HashSet<>();
+        nodeIds.addAll(this.inFlightRequests.getNodesWithTimedOutRequests(now, this.requestTimeoutMs));
+        nodeIds.addAll(this.connectionStates.getNodesWithTimedOutConnects(now, this.requestTimeoutMs));
+
         for (String nodeId : nodeIds) {
             // close connection to the node
             this.selector.close(nodeId);
-            log.debug("Disconnecting from node {} due to request timeout.", nodeId);
+            log.debug("Disconnecting from node {} due to request or connection timeout.", nodeId);
             processDisconnection(responses, nodeId, now, ChannelState.LOCAL_CLOSE);
         }
 
