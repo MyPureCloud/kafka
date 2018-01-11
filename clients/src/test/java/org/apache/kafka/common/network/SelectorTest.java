@@ -1,36 +1,51 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements. See the NOTICE
- * file distributed with this work for additional information regarding copyright ownership. The ASF licenses this file
- * to You under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the
- * License. You may obtain a copy of the License at
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *    http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
- * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
- * specific language governing permissions and limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 package org.apache.kafka.common.network;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
-
-import java.util.HashMap;
-import java.util.Map;
-import java.io.IOException;
-import java.net.InetSocketAddress;
-import java.net.ServerSocket;
-import java.nio.ByteBuffer;
-import java.util.*;
-
 import org.apache.kafka.common.metrics.Metrics;
+import org.apache.kafka.common.protocol.SecurityProtocol;
 import org.apache.kafka.common.utils.MockTime;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.test.TestUtils;
+import org.easymock.IMocksControl;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.nio.ByteBuffer;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.SocketChannel;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Set;
+
+import static org.easymock.EasyMock.createControl;
+import static org.easymock.EasyMock.expect;
+import static org.easymock.EasyMock.expectLastCall;
+
 
 /**
  * A set of tests for the selector. These use a test harness that runs a simple socket server that echos back responses.
@@ -46,9 +61,9 @@ public class SelectorTest {
     private Metrics metrics;
 
     @Before
-    public void setup() throws Exception {
+    public void setUp() throws Exception {
         Map<String, Object> configs = new HashMap<>();
-        this.server = new EchoServer(configs);
+        this.server = new EchoServer(SecurityProtocol.PLAINTEXT, configs);
         this.server.start();
         this.time = new MockTime();
         this.channelBuilder = new PlaintextChannelBuilder();
@@ -58,7 +73,7 @@ public class SelectorTest {
     }
 
     @After
-    public void teardown() throws Exception {
+    public void tearDown() throws Exception {
         this.selector.close();
         this.server.close();
         this.metrics.close();
@@ -77,7 +92,7 @@ public class SelectorTest {
 
         // disconnect
         this.server.closeConnections();
-        while (!selector.disconnected().contains(node))
+        while (!selector.disconnected().containsKey(node))
             selector.poll(1000L);
 
         // reconnect and do another request
@@ -111,7 +126,7 @@ public class SelectorTest {
      */
     @Test(expected = IOException.class)
     public void testNoRouteToHost() throws Exception {
-        selector.connect("0", new InetSocketAddress("asdf.asdf.dsc", server.port), BUFFER_SIZE, BUFFER_SIZE);
+        selector.connect("0", new InetSocketAddress("some.invalid.hostname.foo.bar.local", server.port), BUFFER_SIZE, BUFFER_SIZE);
     }
 
     /**
@@ -123,8 +138,10 @@ public class SelectorTest {
         ServerSocket nonListeningSocket = new ServerSocket(0);
         int nonListeningPort = nonListeningSocket.getLocalPort();
         selector.connect(node, new InetSocketAddress("localhost", nonListeningPort), BUFFER_SIZE, BUFFER_SIZE);
-        while (selector.disconnected().contains(node))
+        while (selector.disconnected().containsKey(node)) {
+            assertEquals(ChannelState.NOT_CONNECTED, selector.disconnected().get(node));
             selector.poll(1000L);
+        }
         nonListeningSocket.close();
     }
 
@@ -258,10 +275,100 @@ public class SelectorTest {
         time.sleep(6000); // The max idle time is 5000ms
         selector.poll(0);
 
-        assertTrue("The idle connection should have been closed", selector.disconnected().contains(id));
+        assertTrue("The idle connection should have been closed", selector.disconnected().containsKey(id));
+        assertEquals(ChannelState.EXPIRED, selector.disconnected().get(id));
     }
 
-    
+    @Test
+    public void testCloseOldestConnectionWithOneStagedReceive() throws Exception {
+        verifyCloseOldestConnectionWithStagedReceives(1);
+    }
+
+    @Test
+    public void testCloseOldestConnectionWithMultipleStagedReceives() throws Exception {
+        verifyCloseOldestConnectionWithStagedReceives(5);
+    }
+
+    private void verifyCloseOldestConnectionWithStagedReceives(int maxStagedReceives) throws Exception {
+        String id = "0";
+        blockingConnect(id);
+        KafkaChannel channel = selector.channel(id);
+
+        selector.mute(id);
+        for (int i = 0; i <= maxStagedReceives; i++) {
+            selector.send(createSend(id, String.valueOf(i)));
+            selector.poll(1000);
+        }
+
+        selector.unmute(id);
+        do {
+            selector.poll(1000);
+        } while (selector.completedReceives().isEmpty());
+
+        int stagedReceives = selector.numStagedReceives(channel);
+        int completedReceives = 0;
+        while (selector.disconnected().isEmpty()) {
+            time.sleep(6000); // The max idle time is 5000ms
+            selector.poll(0);
+            completedReceives += selector.completedReceives().size();
+            // With SSL, more receives may be staged from buffered data
+            int newStaged = selector.numStagedReceives(channel) - (stagedReceives - completedReceives);
+            if (newStaged > 0) {
+                stagedReceives += newStaged;
+                assertNotNull("Channel should not have been expired", selector.channel(id));
+                assertFalse("Channel should not have been disconnected", selector.disconnected().containsKey(id));
+            } else if (!selector.completedReceives().isEmpty()) {
+                assertEquals(1, selector.completedReceives().size());
+                assertTrue("Channel not found", selector.closingChannel(id) != null || selector.channel(id) != null);
+                assertFalse("Disconnect notified too early", selector.disconnected().containsKey(id));
+            }
+        }
+        assertEquals(stagedReceives, completedReceives);
+        assertNull("Channel not removed", selector.channel(id));
+        assertNull("Channel not removed", selector.closingChannel(id));
+        assertTrue("Disconnect not notified", selector.disconnected().containsKey(id));
+        assertTrue("Unexpected receive", selector.completedReceives().isEmpty());
+    }
+
+    /**
+     * Tests that a connect and disconnect in a single poll invocation results in the channel id being
+     * in `disconnected`, but not `connected`.
+     */
+    @Test
+    public void testConnectDisconnectDuringInSinglePoll() throws Exception {
+        IMocksControl control = createControl();
+
+        // channel is connected, not ready and it throws an exception during prepare
+        KafkaChannel kafkaChannel = control.createMock(KafkaChannel.class);
+        expect(kafkaChannel.id()).andStubReturn("1");
+        expect(kafkaChannel.socketDescription()).andStubReturn("");
+        expect(kafkaChannel.state()).andStubReturn(ChannelState.NOT_CONNECTED);
+        expect(kafkaChannel.finishConnect()).andReturn(true);
+        expect(kafkaChannel.isConnected()).andStubReturn(true);
+        // record void method invocations
+        kafkaChannel.disconnect();
+        kafkaChannel.close();
+        expect(kafkaChannel.ready()).andReturn(false);
+        // prepare throws an exception
+        kafkaChannel.prepare();
+        expectLastCall().andThrow(new IOException());
+
+        SelectionKey selectionKey = control.createMock(SelectionKey.class);
+        expect(selectionKey.channel()).andReturn(SocketChannel.open());
+        expect(selectionKey.readyOps()).andStubReturn(SelectionKey.OP_CONNECT);
+
+        control.replay();
+
+        selectionKey.attach(kafkaChannel);
+        Set<SelectionKey> selectionKeys = Utils.mkSet(selectionKey);
+        selector.pollSelectionKeys(selectionKeys, false, System.nanoTime());
+
+        assertFalse(selector.connected().contains(kafkaChannel.id()));
+        assertTrue(selector.disconnected().containsKey(kafkaChannel.id()));
+
+        control.verify();
+    }
+
     private String blockingRequest(String node, String s) throws IOException {
         selector.send(createSend(node, s));
         selector.poll(1000L);
@@ -272,7 +379,7 @@ public class SelectorTest {
                     return asString(receive);
         }
     }
-    
+
     protected void connect(String node, InetSocketAddress serverAddr) throws IOException {
         selector.connect(node, serverAddr, BUFFER_SIZE, BUFFER_SIZE);
     }

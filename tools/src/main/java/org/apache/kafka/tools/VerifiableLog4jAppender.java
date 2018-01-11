@@ -1,10 +1,10 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with
+ * contributor license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright ownership.
  * The ASF licenses this file to You under the Apache License, Version 2.0
  * (the "License"); you may not use this file except in compliance with
- * the License.  You may obtain a copy of the License at
+ * the License. You may obtain a copy of the License at
  *
  *    http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -16,11 +16,12 @@
  */
 package org.apache.kafka.tools;
 
-
 import net.sourceforge.argparse4j.ArgumentParsers;
 import net.sourceforge.argparse4j.inf.ArgumentParser;
 import net.sourceforge.argparse4j.inf.ArgumentParserException;
 import net.sourceforge.argparse4j.inf.Namespace;
+import org.apache.kafka.common.protocol.SecurityProtocol;
+import org.apache.kafka.common.utils.Exit;
 import org.apache.log4j.Logger;
 import org.apache.log4j.PropertyConfigurator;
 
@@ -96,7 +97,7 @@ public class VerifiableLog4jAppender {
             .required(false)
             .setDefault("PLAINTEXT")
             .type(String.class)
-            .choices("PLAINTEXT", "SSL")
+            .choices("PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL")
             .metavar("SECURITY-PROTOCOL")
             .dest("securityProtocol")
             .help("Security protocol to be used while communicating with Kafka brokers.");
@@ -124,6 +125,30 @@ public class VerifiableLog4jAppender {
             .metavar("CONFIG_FILE")
             .help("Log4jAppender config properties file.");
 
+        parser.addArgument("--sasl-kerberos-service-name")
+            .action(store())
+            .required(false)
+            .type(String.class)
+            .metavar("SASL-KERBEROS-SERVICE-NAME")
+            .dest("saslKerberosServiceName")
+            .help("Name of sasl kerberos service.");
+
+        parser.addArgument("--client-jaas-conf-path")
+            .action(store())
+            .required(false)
+            .type(String.class)
+            .metavar("CLIENT-JAAS-CONF-PATH")
+            .dest("clientJaasConfPath")
+            .help("Path of JAAS config file of Kafka client.");
+
+        parser.addArgument("--kerb5-conf-path")
+            .action(store())
+            .required(false)
+            .type(String.class)
+            .metavar("KERB5-CONF-PATH")
+            .dest("kerb5ConfPath")
+            .help("Path of Kerb5 config file.");
+
         return parser;
     }
 
@@ -133,18 +158,13 @@ public class VerifiableLog4jAppender {
      *
      * Note: this duplication of org.apache.kafka.common.utils.Utils.loadProps is unfortunate
      * but *intentional*. In order to use VerifiableProducer in compatibility and upgrade tests,
-     * we use VerifiableProducer from trunk tools package, and run it against 0.8.X.X kafka jars.
+     * we use VerifiableProducer from the development tools package, and run it against 0.8.X.X kafka jars.
      * Since this method is not in Utils in the 0.8.X.X jars, we have to cheat a bit and duplicate.
      */
     public static Properties loadProps(String filename) throws IOException, FileNotFoundException {
         Properties props = new Properties();
-        InputStream propStream = null;
-        try {
-            propStream = new FileInputStream(filename);
+        try (InputStream propStream = new FileInputStream(filename)) {
             props.load(propStream);
-        } finally {
-            if (propStream != null)
-                propStream.close();
         }
         return props;
     }
@@ -171,10 +191,17 @@ public class VerifiableLog4jAppender {
             props.setProperty("log4j.appender.KAFKA.RequiredNumAcks", res.getString("acks"));
             props.setProperty("log4j.appender.KAFKA.SyncSend", "true");
             final String securityProtocol = res.getString("securityProtocol");
-            if (securityProtocol != null && securityProtocol.equals("SSL")) {
+            if (securityProtocol != null && !securityProtocol.equals(SecurityProtocol.PLAINTEXT.toString())) {
                 props.setProperty("log4j.appender.KAFKA.SecurityProtocol", securityProtocol);
+            }
+            if (securityProtocol != null && securityProtocol.contains("SSL")) {
                 props.setProperty("log4j.appender.KAFKA.SslTruststoreLocation", res.getString("sslTruststoreLocation"));
                 props.setProperty("log4j.appender.KAFKA.SslTruststorePassword", res.getString("sslTruststorePassword"));
+            }
+            if (securityProtocol != null && securityProtocol.contains("SASL")) {
+                props.setProperty("log4j.appender.KAFKA.SaslKerberosServiceName", res.getString("saslKerberosServiceName"));
+                props.setProperty("log4j.appender.KAFKA.clientJaasConfPath", res.getString("clientJaasConfPath"));
+                props.setProperty("log4j.appender.KAFKA.kerb5ConfPath", res.getString("kerb5ConfPath"));
             }
             props.setProperty("log4j.logger.kafka.log4j", "INFO, KAFKA");
 
@@ -190,10 +217,10 @@ public class VerifiableLog4jAppender {
         } catch (ArgumentParserException e) {
             if (args.length == 0) {
                 parser.printHelp();
-                System.exit(0);
+                Exit.exit(0);
             } else {
                 parser.handleError(e);
-                System.exit(1);
+                Exit.exit(1);
             }
         }
 

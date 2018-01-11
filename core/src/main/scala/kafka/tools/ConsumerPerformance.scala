@@ -19,23 +19,26 @@ package kafka.tools
 
 import java.util
 
-import org.apache.kafka.common.TopicPartition
-
-import scala.collection.JavaConversions._
+import scala.collection.JavaConverters._
 import java.util.concurrent.atomic.AtomicLong
 import java.nio.channels.ClosedByInterruptException
+
 import org.apache.log4j.Logger
 import org.apache.kafka.clients.consumer.{ConsumerRebalanceListener, KafkaConsumer}
 import org.apache.kafka.common.serialization.ByteArrayDeserializer
 import org.apache.kafka.common.utils.Utils
-import kafka.utils.CommandLineUtils
-import java.util.{ Random, Properties }
+import org.apache.kafka.common.{Metric, MetricName, TopicPartition}
+import kafka.utils.{CommandLineUtils, ToolsUtils}
+import java.util.{Collections, Properties, Random}
+
 import kafka.consumer.Consumer
 import kafka.consumer.ConsumerConnector
 import kafka.consumer.KafkaStream
 import kafka.consumer.ConsumerTimeoutException
 import java.text.SimpleDateFormat
 import java.util.concurrent.atomic.AtomicBoolean
+
+import scala.collection.mutable
 
 /**
  * Performance test for the full zookeeper consumer
@@ -50,6 +53,7 @@ object ConsumerPerformance {
     val totalMessagesRead = new AtomicLong(0)
     val totalBytesRead = new AtomicLong(0)
     val consumerTimeout = new AtomicBoolean(false)
+    var metrics: mutable.Map[MetricName, _ <: Metric] = null
 
     if (!config.hideHeader) {
       if (!config.showDetailedStats)
@@ -59,12 +63,16 @@ object ConsumerPerformance {
     }
 
     var startMs, endMs = 0L
-    if(config.useNewConsumer) {
+    if (!config.useOldConsumer) {
       val consumer = new KafkaConsumer[Array[Byte], Array[Byte]](config.props)
-      consumer.subscribe(List(config.topic))
+      consumer.subscribe(Collections.singletonList(config.topic))
       startMs = System.currentTimeMillis
       consume(consumer, List(config.topic), config.numMessages, 1000, config, totalMessagesRead, totalBytesRead)
       endMs = System.currentTimeMillis
+
+      if (config.printMetrics) {
+        metrics = consumer.metrics().asScala
+      }
       consumer.close()
     } else {
       import kafka.consumer.ConsumerConfig
@@ -72,7 +80,7 @@ object ConsumerPerformance {
       val consumerConnector: ConsumerConnector = Consumer.create(consumerConfig)
       val topicMessageStreams = consumerConnector.createMessageStreams(Map(config.topic -> config.numThreads))
       var threadList = List[ConsumerPerfThread]()
-      for ((topic, streamList) <- topicMessageStreams)
+      for (streamList <- topicMessageStreams.values)
         for (i <- 0 until streamList.length)
           threadList ::= new ConsumerPerfThread(i, "kafka-zk-consumer-" + i, streamList(i), config, totalMessagesRead, totalBytesRead, consumerTimeout)
 
@@ -84,20 +92,24 @@ object ConsumerPerformance {
         thread.start
       for (thread <- threadList)
         thread.join
-      if(consumerTimeout.get())
-	endMs = System.currentTimeMillis - consumerConfig.consumerTimeoutMs
-      else
-	endMs = System.currentTimeMillis
+      endMs =
+        if (consumerTimeout.get()) System.currentTimeMillis - consumerConfig.consumerTimeoutMs
+        else System.currentTimeMillis
       consumerConnector.shutdown()
     }
     val elapsedSecs = (endMs - startMs) / 1000.0
     if (!config.showDetailedStats) {
       val totalMBRead = (totalBytesRead.get * 1.0) / (1024 * 1024)
-      println(("%s, %s, %.4f, %.4f, %d, %.4f").format(config.dateFormat.format(startMs), config.dateFormat.format(endMs),
+      println("%s, %s, %.4f, %.4f, %d, %.4f".format(config.dateFormat.format(startMs), config.dateFormat.format(endMs),
         totalMBRead, totalMBRead / elapsedSecs, totalMessagesRead.get, totalMessagesRead.get / elapsedSecs))
     }
+
+    if (metrics != null) {
+      ToolsUtils.printMetrics(metrics)
+    }
+
   }
-  
+
   def consume(consumer: KafkaConsumer[Array[Byte], Array[Byte]], topics: List[String], count: Long, timeout: Long, config: ConsumerPerfConfig, totalMessagesRead: AtomicLong, totalBytesRead: AtomicLong) {
     var bytesRead = 0L
     var messagesRead = 0L
@@ -107,7 +119,7 @@ object ConsumerPerformance {
     // Wait for group join, metadata fetch, etc
     val joinTimeout = 10000
     val isAssigned = new AtomicBoolean(false)
-    consumer.subscribe(topics, new ConsumerRebalanceListener {
+    consumer.subscribe(topics.asJava, new ConsumerRebalanceListener {
       def onPartitionsAssigned(partitions: util.Collection[TopicPartition]) {
         isAssigned.set(true)
       }
@@ -121,54 +133,56 @@ object ConsumerPerformance {
       }
       consumer.poll(100)
     }
-    consumer.seekToBeginning()
+    consumer.seekToBeginning(Collections.emptyList())
 
     // Now start the benchmark
     val startMs = System.currentTimeMillis
     var lastReportTime: Long = startMs
     var lastConsumedTime = System.currentTimeMillis
-    
-    while(messagesRead < count && System.currentTimeMillis() - lastConsumedTime <= timeout) {
-      val records = consumer.poll(100)
-      if(records.count() > 0)
-        lastConsumedTime = System.currentTimeMillis
-      for(record <- records) {
+    var currentTimeMillis = lastConsumedTime
+
+    while (messagesRead < count && currentTimeMillis - lastConsumedTime <= timeout) {
+      val records = consumer.poll(100).asScala
+      currentTimeMillis = System.currentTimeMillis
+      if (records.nonEmpty)
+        lastConsumedTime = currentTimeMillis
+      for (record <- records) {
         messagesRead += 1
-        if(record.key != null)
+        if (record.key != null)
           bytesRead += record.key.size
-        if(record.value != null)
-          bytesRead += record.value.size 
-      
-        if (messagesRead % config.reportingInterval == 0) {
+        if (record.value != null)
+          bytesRead += record.value.size
+
+        if (currentTimeMillis - lastReportTime >= config.reportingInterval) {
           if (config.showDetailedStats)
-            printProgressMessage(0, bytesRead, lastBytesRead, messagesRead, lastMessagesRead, lastReportTime, System.currentTimeMillis, config.dateFormat)
-          lastReportTime = System.currentTimeMillis
+            printProgressMessage(0, bytesRead, lastBytesRead, messagesRead, lastMessagesRead, lastReportTime, currentTimeMillis, config.dateFormat)
+          lastReportTime = currentTimeMillis
           lastMessagesRead = messagesRead
           lastBytesRead = bytesRead
         }
       }
     }
-    
+
     totalMessagesRead.set(messagesRead)
     totalBytesRead.set(bytesRead)
   }
-  
+
   def printProgressMessage(id: Int, bytesRead: Long, lastBytesRead: Long, messagesRead: Long, lastMessagesRead: Long,
     startMs: Long, endMs: Long, dateFormat: SimpleDateFormat) = {
     val elapsedMs: Double = endMs - startMs
     val totalMBRead = (bytesRead * 1.0) / (1024 * 1024)
     val mbRead = ((bytesRead - lastBytesRead) * 1.0) / (1024 * 1024)
-    println(("%s, %d, %.4f, %.4f, %d, %.4f").format(dateFormat.format(endMs), id, totalMBRead,
+    println("%s, %d, %.4f, %.4f, %d, %.4f".format(dateFormat.format(endMs), id, totalMBRead,
         1000.0 * (mbRead / elapsedMs), messagesRead, ((messagesRead - lastMessagesRead) / elapsedMs) * 1000.0))
   }
 
   class ConsumerPerfConfig(args: Array[String]) extends PerfConfig(args) {
-    val zkConnectOpt = parser.accepts("zookeeper", "The connection string for the zookeeper connection in the form host:port. " +
+    val zkConnectOpt = parser.accepts("zookeeper", "REQUIRED (only when using old consumer): The connection string for the zookeeper connection in the form host:port. " +
       "Multiple URLS can be given to allow fail-over. This option is only used with the old consumer.")
       .withRequiredArg
       .describedAs("urls")
       .ofType(classOf[String])
-    val bootstrapServersOpt = parser.accepts("broker-list", "A broker list to use for connecting if using the new consumer.")
+    val bootstrapServersOpt = parser.accepts("broker-list", "REQUIRED (unless old consumer is used): A broker list to use for connecting if using the new consumer.")
       .withRequiredArg()
       .describedAs("host")
       .ofType(classOf[String])
@@ -203,23 +217,26 @@ object ConsumerPerformance {
       .describedAs("count")
       .ofType(classOf[java.lang.Integer])
       .defaultsTo(1)
-    val useNewConsumerOpt = parser.accepts("new-consumer", "Use the new consumer implementation.")
+    val newConsumerOpt = parser.accepts("new-consumer", "Use the new consumer implementation. This is the default.")
     val consumerConfigOpt = parser.accepts("consumer.config", "Consumer config properties file.")
       .withRequiredArg
       .describedAs("config file")
       .ofType(classOf[String])
+    val printMetricsOpt = parser.accepts("print-metrics", "Print out the metrics. This only applies to new consumer.")
 
     val options = parser.parse(args: _*)
 
     CommandLineUtils.checkRequiredArgs(parser, options, topicOpt, numMessagesOpt)
-   
-    val useNewConsumer = options.has(useNewConsumerOpt)
-    
+
+    val useOldConsumer = options.has(zkConnectOpt)
+    val printMetrics = options.has(printMetricsOpt)
+
     val props = if (options.has(consumerConfigOpt))
       Utils.loadProps(options.valueOf(consumerConfigOpt))
     else
       new Properties
-    if(useNewConsumer) {
+    if (!useOldConsumer) {
+      CommandLineUtils.checkRequiredArgs(parser, options, bootstrapServersOpt)
       import org.apache.kafka.clients.consumer.ConsumerConfig
       props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, options.valueOf(bootstrapServersOpt))
       props.put(ConsumerConfig.GROUP_ID_CONFIG, options.valueOf(groupIdOpt))
@@ -230,6 +247,10 @@ object ConsumerPerformance {
       props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, classOf[ByteArrayDeserializer])
       props.put(ConsumerConfig.CHECK_CRCS_CONFIG, "false")
     } else {
+      if (options.has(bootstrapServersOpt))
+        CommandLineUtils.printUsageAndDie(parser, s"Option $bootstrapServersOpt is not valid with $zkConnectOpt.")
+      else if (options.has(newConsumerOpt))
+        CommandLineUtils.printUsageAndDie(parser, s"Option $newConsumerOpt is not valid with $zkConnectOpt.")
       CommandLineUtils.checkRequiredArgs(parser, options, zkConnectOpt, numMessagesOpt)
       props.put("group.id", options.valueOf(groupIdOpt))
       props.put("socket.receive.buffer.bytes", options.valueOf(socketBufferSizeOpt).toString)
@@ -243,6 +264,8 @@ object ConsumerPerformance {
     val topic = options.valueOf(topicOpt)
     val numMessages = options.valueOf(numMessagesOpt).longValue
     val reportingInterval = options.valueOf(reportingIntervalOpt).intValue
+    if (reportingInterval <= 0)
+      throw new IllegalArgumentException("Reporting interval must be greater than 0.")
     val showDetailedStats = options.has(showDetailedStatsOpt)
     val dateFormat = new SimpleDateFormat(options.valueOf(dateFormatOpt))
     val hideHeader = options.has(hideHeaderOpt)
@@ -266,11 +289,12 @@ object ConsumerPerformance {
           val messageAndMetadata = iter.next
           messagesRead += 1
           bytesRead += messageAndMetadata.message.length
+          val currentTimeMillis = System.currentTimeMillis
 
-          if (messagesRead % config.reportingInterval == 0) {
+          if (currentTimeMillis - lastReportTime >= config.reportingInterval) {
             if (config.showDetailedStats)
-              printProgressMessage(threadId, bytesRead, lastBytesRead, messagesRead, lastMessagesRead, lastReportTime, System.currentTimeMillis, config.dateFormat)
-            lastReportTime = System.currentTimeMillis
+              printProgressMessage(threadId, bytesRead, lastBytesRead, messagesRead, lastMessagesRead, lastReportTime, currentTimeMillis, config.dateFormat)
+            lastReportTime = currentTimeMillis
             lastMessagesRead = messagesRead
             lastBytesRead = bytesRead
           }
@@ -278,9 +302,8 @@ object ConsumerPerformance {
       } catch {
         case _: InterruptedException =>
         case _: ClosedByInterruptException =>
-        case _: ConsumerTimeoutException => {
-          consumerTimeout.set(true);
-        }
+        case _: ConsumerTimeoutException =>
+          consumerTimeout.set(true)
         case e: Throwable => e.printStackTrace()
       }
       totalMessagesRead.addAndGet(messagesRead)

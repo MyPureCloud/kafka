@@ -1,10 +1,10 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with
+ * contributor license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright ownership.
  * The ASF licenses this file to You under the Apache License, Version 2.0
  * (the "License"); you may not use this file except in compliance with
- * the License.  You may obtain a copy of the License at
+ * the License. You may obtain a copy of the License at
  *
  *    http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -14,12 +14,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.kafka.common.network;
 
 /*
  * Transport layer for underlying communication.
- * At very basic level it is wrapper around SocketChannel and can be used as substitue for SocketChannel
+ * At very basic level it is wrapper around SocketChannel and can be used as substitute for SocketChannel
  * and other network Channel implementations.
  * As NetworkClient replaces BlockingChannel and other implementations we will be using KafkaChannel as
  * a network I/O channel.
@@ -43,7 +42,7 @@ public interface TransportLayer extends ScatteringByteChannel, GatheringByteChan
     /**
      * Finishes the process of connecting a socket channel.
      */
-    void finishConnect() throws IOException;
+    boolean finishConnect() throws IOException;
 
     /**
      * disconnect socketChannel

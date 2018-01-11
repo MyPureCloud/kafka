@@ -1,10 +1,10 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with
+ * contributor license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright ownership.
  * The ASF licenses this file to You under the Apache License, Version 2.0
  * (the "License"); you may not use this file except in compliance with
- * the License.  You may obtain a copy of the License at
+ * the License. You may obtain a copy of the License at
  *
  *    http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -14,15 +14,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.kafka.streams.processor;
 
+import org.apache.kafka.common.annotation.InterfaceStability;
+
 /**
- * A processor of messages.
+ * A processor of key-value pair records.
  *
  * @param <K> the type of keys
  * @param <V> the type of values
  */
+@InterfaceStability.Evolving
 public interface Processor<K, V> {
 
     /**
@@ -37,10 +39,10 @@ public interface Processor<K, V> {
     void init(ProcessorContext context);
 
     /**
-     * Process the message with the given key and value.
-     * 
-     * @param key the key for the message
-     * @param value the value for the message
+     * Process the record with the given key and value.
+     *
+     * @param key the key for the record
+     * @param value the value for the record
      */
     void process(K key, V value);
 
@@ -53,7 +55,10 @@ public interface Processor<K, V> {
     void punctuate(long timestamp);
 
     /**
-     * Close this processor and clean up any resources.
+     * Close this processor and clean up any resources. Be aware that {@link #close()} is called after an internal cleanup.
+     * Thus, it is not possible to write anything to Kafka as underlying clients are already closed.
+     * <p>
+     * Note: Do not close any streams managed resources, like {@link StateStore}s here, as they are managed by the library.
      */
     void close();
 }

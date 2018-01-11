@@ -1,10 +1,10 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with
+ * contributor license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright ownership.
  * The ASF licenses this file to You under the Apache License, Version 2.0
  * (the "License"); you may not use this file except in compliance with
- * the License.  You may obtain a copy of the License at
+ * the License. You may obtain a copy of the License at
  *
  *    http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -14,7 +14,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.kafka.common.network;
 
 /*
@@ -30,11 +29,8 @@ import java.nio.channels.SelectionKey;
 import java.security.Principal;
 
 import org.apache.kafka.common.security.auth.KafkaPrincipal;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 public class PlaintextTransportLayer implements TransportLayer {
-    private static final Logger log = LoggerFactory.getLogger(PlaintextTransportLayer.class);
     private final SelectionKey key;
     private final SocketChannel socketChannel;
     private final Principal principal = KafkaPrincipal.ANONYMOUS;
@@ -50,9 +46,11 @@ public class PlaintextTransportLayer implements TransportLayer {
     }
 
     @Override
-    public void finishConnect() throws IOException {
-        socketChannel.finishConnect();
-        key.interestOps(key.interestOps() & ~SelectionKey.OP_CONNECT | SelectionKey.OP_READ);
+    public boolean finishConnect() throws IOException {
+        boolean connected = socketChannel.finishConnect();
+        if (connected)
+            key.interestOps(key.interestOps() & ~SelectionKey.OP_CONNECT | SelectionKey.OP_READ);
+        return connected;
     }
 
     @Override
@@ -82,10 +80,13 @@ public class PlaintextTransportLayer implements TransportLayer {
      */
     @Override
     public void close() throws IOException {
-        socketChannel.socket().close();
-        socketChannel.close();
-        key.attach(null);
-        key.cancel();
+        try {
+            socketChannel.socket().close();
+            socketChannel.close();
+        } finally {
+            key.attach(null);
+            key.cancel();
+        }
     }
 
     /**

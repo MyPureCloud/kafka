@@ -18,16 +18,18 @@ package kafka.server
 
 import kafka.log._
 import java.io.File
-import org.I0Itec.zkclient.ZkClient
+
 import org.apache.kafka.common.metrics.Metrics
+import org.apache.kafka.common.utils.Utils
 import org.easymock.EasyMock
 import org.junit._
 import org.junit.Assert._
 import kafka.common._
 import kafka.cluster.Replica
-import kafka.utils.{ZkUtils, SystemTime, KafkaScheduler, TestUtils, MockTime, CoreUtils}
+import kafka.utils.{KafkaScheduler, MockTime, TestUtils, ZkUtils}
 import java.util.concurrent.atomic.AtomicBoolean
-import org.apache.kafka.common.utils.{MockTime => JMockTime}
+
+import org.apache.kafka.common.TopicPartition
 
 class HighwatermarkPersistenceTest {
 
@@ -42,7 +44,7 @@ class HighwatermarkPersistenceTest {
   @After
   def teardown() {
     for(manager <- logManagers; dir <- manager.logDirs)
-      CoreUtils.rm(dir)
+      Utils.delete(dir)
   }
 
   @Test
@@ -55,20 +57,23 @@ class HighwatermarkPersistenceTest {
     val scheduler = new KafkaScheduler(2)
     scheduler.startup
     val metrics = new Metrics
+    val time = new MockTime
     // create replica manager
-    val replicaManager = new ReplicaManager(configs.head, metrics, new MockTime, new JMockTime, zkUtils, scheduler,
-      logManagers(0), new AtomicBoolean(false))
+    val replicaManager = new ReplicaManager(configs.head, metrics, time, zkUtils, scheduler,
+      logManagers.head, new AtomicBoolean(false), QuotaFactory.instantiate(configs.head, metrics, time).follower,
+      new BrokerTopicStats, new MetadataCache(configs.head.brokerId))
     replicaManager.startup()
     try {
       replicaManager.checkpointHighWatermarks()
       var fooPartition0Hw = hwmFor(replicaManager, topic, 0)
       assertEquals(0L, fooPartition0Hw)
-      val partition0 = replicaManager.getOrCreatePartition(topic, 0)
+      val tp0 = new TopicPartition(topic, 0)
+      val partition0 = replicaManager.getOrCreatePartition(tp0)
       // create leader and follower replicas
-      val log0 = logManagers(0).createLog(TopicAndPartition(topic, 0), LogConfig())
-      val leaderReplicaPartition0 = new Replica(configs.head.brokerId, partition0, SystemTime, 0, Some(log0))
+      val log0 = logManagers.head.createLog(new TopicPartition(topic, 0), LogConfig())
+      val leaderReplicaPartition0 = new Replica(configs.head.brokerId, tp0, time, 0, Some(log0))
       partition0.addReplicaIfNotExists(leaderReplicaPartition0)
-      val followerReplicaPartition0 = new Replica(configs.last.brokerId, partition0, SystemTime)
+      val followerReplicaPartition0 = new Replica(configs.last.brokerId, tp0, time)
       partition0.addReplicaIfNotExists(followerReplicaPartition0)
       replicaManager.checkpointHighWatermarks()
       fooPartition0Hw = hwmFor(replicaManager, topic, 0)
@@ -98,19 +103,22 @@ class HighwatermarkPersistenceTest {
     val scheduler = new KafkaScheduler(2)
     scheduler.startup
     val metrics = new Metrics
+    val time = new MockTime
     // create replica manager
-    val replicaManager = new ReplicaManager(configs.head, metrics, new MockTime(), new JMockTime, zkUtils,
-      scheduler, logManagers(0), new AtomicBoolean(false))
+    val replicaManager = new ReplicaManager(configs.head, metrics, time, zkUtils,
+      scheduler, logManagers.head, new AtomicBoolean(false), QuotaFactory.instantiate(configs.head, metrics, time).follower,
+      new BrokerTopicStats, new MetadataCache(configs.head.brokerId))
     replicaManager.startup()
     try {
       replicaManager.checkpointHighWatermarks()
       var topic1Partition0Hw = hwmFor(replicaManager, topic1, 0)
       assertEquals(0L, topic1Partition0Hw)
-      val topic1Partition0 = replicaManager.getOrCreatePartition(topic1, 0)
+      val t1p0 = new TopicPartition(topic1, 0)
+      val topic1Partition0 = replicaManager.getOrCreatePartition(t1p0)
       // create leader log
-      val topic1Log0 = logManagers(0).createLog(TopicAndPartition(topic1, 0), LogConfig())
+      val topic1Log0 = logManagers.head.createLog(t1p0, LogConfig())
       // create a local replica for topic1
-      val leaderReplicaTopic1Partition0 = new Replica(configs.head.brokerId, topic1Partition0, SystemTime, 0, Some(topic1Log0))
+      val leaderReplicaTopic1Partition0 = new Replica(configs.head.brokerId, t1p0, time, 0, Some(topic1Log0))
       topic1Partition0.addReplicaIfNotExists(leaderReplicaTopic1Partition0)
       replicaManager.checkpointHighWatermarks()
       topic1Partition0Hw = hwmFor(replicaManager, topic1, 0)
@@ -122,11 +130,12 @@ class HighwatermarkPersistenceTest {
       assertEquals(5L, leaderReplicaTopic1Partition0.highWatermark.messageOffset)
       assertEquals(5L, topic1Partition0Hw)
       // add another partition and set highwatermark
-      val topic2Partition0 = replicaManager.getOrCreatePartition(topic2, 0)
+      val t2p0 = new TopicPartition(topic2, 0)
+      val topic2Partition0 = replicaManager.getOrCreatePartition(t2p0)
       // create leader log
-      val topic2Log0 = logManagers(0).createLog(TopicAndPartition(topic2, 0), LogConfig())
+      val topic2Log0 = logManagers.head.createLog(t2p0, LogConfig())
       // create a local replica for topic2
-      val leaderReplicaTopic2Partition0 =  new Replica(configs.head.brokerId, topic2Partition0, SystemTime, 0, Some(topic2Log0))
+      val leaderReplicaTopic2Partition0 =  new Replica(configs.head.brokerId, t2p0, time, 0, Some(topic2Log0))
       topic2Partition0.addReplicaIfNotExists(leaderReplicaTopic2Partition0)
       replicaManager.checkpointHighWatermarks()
       var topic2Partition0Hw = hwmFor(replicaManager, topic2, 0)
@@ -154,7 +163,8 @@ class HighwatermarkPersistenceTest {
   }
 
   def hwmFor(replicaManager: ReplicaManager, topic: String, partition: Int): Long = {
-    replicaManager.highWatermarkCheckpoints(new File(replicaManager.config.logDirs(0)).getAbsolutePath).read.getOrElse(TopicAndPartition(topic, partition), 0L)
+    replicaManager.highWatermarkCheckpoints(new File(replicaManager.config.logDirs.head).getAbsolutePath).read.getOrElse(
+      new TopicPartition(topic, partition), 0L)
   }
   
 }

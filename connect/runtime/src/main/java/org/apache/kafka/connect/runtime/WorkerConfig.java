@@ -1,41 +1,36 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with
+ * contributor license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright ownership.
  * The ASF licenses this file to You under the Apache License, Version 2.0
  * (the "License"); you may not use this file except in compliance with
- * the License.  You may obtain a copy of the License at
- * <p/>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p/>
+ * the License. You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- **/
-
+ */
 package org.apache.kafka.connect.runtime;
 
-import org.apache.kafka.common.annotation.InterfaceStability;
+import org.apache.kafka.clients.CommonClientConfigs;
 import org.apache.kafka.common.config.AbstractConfig;
 import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.config.ConfigDef.Importance;
 import org.apache.kafka.common.config.ConfigDef.Type;
 
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 
 /**
  * Common base class providing configuration for Kafka Connect workers, whether standalone or distributed.
  */
-@InterfaceStability.Unstable
 public class WorkerConfig extends AbstractConfig {
-
-    public static final String CLUSTER_CONFIG = "cluster";
-    private static final String CLUSTER_CONFIG_DOC =
-            "ID for this cluster, which is used to provide a namespace so multiple Kafka Connect clusters "
-                    + "or instances may co-exist while sharing a single Kafka cluster.";
-    public static final String CLUSTER_DEFAULT = "connect";
 
     public static final String BOOTSTRAP_SERVERS_CONFIG = "bootstrap.servers";
     public static final String BOOTSTRAP_SERVERS_DOC
@@ -51,19 +46,35 @@ public class WorkerConfig extends AbstractConfig {
 
     public static final String KEY_CONVERTER_CLASS_CONFIG = "key.converter";
     public static final String KEY_CONVERTER_CLASS_DOC =
-            "Converter class for key Connect data that implements the <code>Converter</code> interface.";
+            "Converter class used to convert between Kafka Connect format and the serialized form that is written to Kafka." +
+                    " This controls the format of the keys in messages written to or read from Kafka, and since this is" +
+                    " independent of connectors it allows any connector to work with any serialization format." +
+                    " Examples of common formats include JSON and Avro.";
 
     public static final String VALUE_CONVERTER_CLASS_CONFIG = "value.converter";
     public static final String VALUE_CONVERTER_CLASS_DOC =
-            "Converter class for value Connect data that implements the <code>Converter</code> interface.";
+            "Converter class used to convert between Kafka Connect format and the serialized form that is written to Kafka." +
+                    " This controls the format of the values in messages written to or read from Kafka, and since this is" +
+                    " independent of connectors it allows any connector to work with any serialization format." +
+                    " Examples of common formats include JSON and Avro.";
 
     public static final String INTERNAL_KEY_CONVERTER_CLASS_CONFIG = "internal.key.converter";
     public static final String INTERNAL_KEY_CONVERTER_CLASS_DOC =
-            "Converter class for internal key Connect data that implements the <code>Converter</code> interface. Used for converting data like offsets and configs.";
+            "Converter class used to convert between Kafka Connect format and the serialized form that is written to Kafka." +
+                    " This controls the format of the keys in messages written to or read from Kafka, and since this is" +
+                    " independent of connectors it allows any connector to work with any serialization format." +
+                    " Examples of common formats include JSON and Avro." +
+                    " This setting controls the format used for internal bookkeeping data used by the framework, such as" +
+                    " configs and offsets, so users can typically use any functioning Converter implementation.";
 
     public static final String INTERNAL_VALUE_CONVERTER_CLASS_CONFIG = "internal.value.converter";
     public static final String INTERNAL_VALUE_CONVERTER_CLASS_DOC =
-            "Converter class for offset value Connect data that implements the <code>Converter</code> interface. Used for converting data like offsets and configs.";
+            "Converter class used to convert between Kafka Connect format and the serialized form that is written to Kafka." +
+                    " This controls the format of the values in messages written to or read from Kafka, and since this is" +
+                    " independent of connectors it allows any connector to work with any serialization format." +
+                    " Examples of common formats include JSON and Avro." +
+                    " This setting controls the format used for internal bookkeeping data used by the framework, such as" +
+                    " configs and offsets, so users can typically use any functioning Converter implementation.";
 
     public static final String TASK_SHUTDOWN_GRACEFUL_TIMEOUT_MS_CONFIG
             = "task.shutdown.graceful.timeout.ms";
@@ -101,6 +112,32 @@ public class WorkerConfig extends AbstractConfig {
     private static final String REST_ADVERTISED_PORT_DOC
             = "If this is set, this is the port that will be given out to other workers to connect to.";
 
+    public static final String ACCESS_CONTROL_ALLOW_ORIGIN_CONFIG = "access.control.allow.origin";
+    protected static final String ACCESS_CONTROL_ALLOW_ORIGIN_DOC =
+            "Value to set the Access-Control-Allow-Origin header to for REST API requests." +
+                    "To enable cross origin access, set this to the domain of the application that should be permitted" +
+                    " to access the API, or '*' to allow access from any domain. The default value only allows access" +
+                    " from the domain of the REST API.";
+    protected static final String ACCESS_CONTROL_ALLOW_ORIGIN_DEFAULT = "";
+
+    public static final String ACCESS_CONTROL_ALLOW_METHODS_CONFIG = "access.control.allow.methods";
+    protected static final String ACCESS_CONTROL_ALLOW_METHODS_DOC =
+        "Sets the methods supported for cross origin requests by setting the Access-Control-Allow-Methods header. "
+        + "The default value of the Access-Control-Allow-Methods header allows cross origin requests for GET, POST and HEAD.";
+    protected static final String ACCESS_CONTROL_ALLOW_METHODS_DEFAULT = "";
+
+    public static final String PLUGIN_PATH_CONFIG = "plugin.path";
+    protected static final String PLUGIN_PATH_DOC = "List of paths separated by commas (,) that "
+            + "contain plugins (connectors, converters, transformations). The list should consist"
+            + " of top level directories that include any combination of: \n"
+            + "a) directories immediately containing jars with plugins and their dependencies\n"
+            + "b) uber-jars with plugins and their dependencies\n"
+            + "c) directories immediately containing the package directory structure of classes of "
+            + "plugins and their dependencies\n"
+            + "Note: symlinks will be followed to discover dependencies or plugins.\n"
+            + "Examples: plugin.path=/usr/local/share/java,/usr/local/share/kafka/plugins,"
+            + "/opt/connectors";
+
     /**
      * Get a basic ConfigDef for a WorkerConfig. This includes all the common settings. Subclasses can use this to
      * bootstrap their own ConfigDef.
@@ -108,7 +145,6 @@ public class WorkerConfig extends AbstractConfig {
      */
     protected static ConfigDef baseConfigDef() {
         return new ConfigDef()
-                .define(CLUSTER_CONFIG, Type.STRING, CLUSTER_DEFAULT, Importance.HIGH, CLUSTER_CONFIG_DOC)
                 .define(BOOTSTRAP_SERVERS_CONFIG, Type.LIST, BOOTSTRAP_SERVERS_DEFAULT,
                         Importance.HIGH, BOOTSTRAP_SERVERS_DOC)
                 .define(KEY_CONVERTER_CLASS_CONFIG, Type.CLASS,
@@ -116,9 +152,9 @@ public class WorkerConfig extends AbstractConfig {
                 .define(VALUE_CONVERTER_CLASS_CONFIG, Type.CLASS,
                         Importance.HIGH, VALUE_CONVERTER_CLASS_DOC)
                 .define(INTERNAL_KEY_CONVERTER_CLASS_CONFIG, Type.CLASS,
-                        Importance.HIGH, INTERNAL_KEY_CONVERTER_CLASS_DOC)
+                        Importance.LOW, INTERNAL_KEY_CONVERTER_CLASS_DOC)
                 .define(INTERNAL_VALUE_CONVERTER_CLASS_CONFIG, Type.CLASS,
-                        Importance.HIGH, INTERNAL_VALUE_CONVERTER_CLASS_DOC)
+                        Importance.LOW, INTERNAL_VALUE_CONVERTER_CLASS_DOC)
                 .define(TASK_SHUTDOWN_GRACEFUL_TIMEOUT_MS_CONFIG, Type.LONG,
                         TASK_SHUTDOWN_GRACEFUL_TIMEOUT_MS_DEFAULT, Importance.LOW,
                         TASK_SHUTDOWN_GRACEFUL_TIMEOUT_MS_DOC)
@@ -129,7 +165,32 @@ public class WorkerConfig extends AbstractConfig {
                 .define(REST_HOST_NAME_CONFIG, Type.STRING, null, Importance.LOW, REST_HOST_NAME_DOC)
                 .define(REST_PORT_CONFIG, Type.INT, REST_PORT_DEFAULT, Importance.LOW, REST_PORT_DOC)
                 .define(REST_ADVERTISED_HOST_NAME_CONFIG, Type.STRING,  null, Importance.LOW, REST_ADVERTISED_HOST_NAME_DOC)
-                .define(REST_ADVERTISED_PORT_CONFIG, Type.INT,  null, Importance.LOW, REST_ADVERTISED_PORT_DOC);
+                .define(REST_ADVERTISED_PORT_CONFIG, Type.INT,  null, Importance.LOW, REST_ADVERTISED_PORT_DOC)
+                .define(ACCESS_CONTROL_ALLOW_ORIGIN_CONFIG, Type.STRING,
+                        ACCESS_CONTROL_ALLOW_ORIGIN_DEFAULT, Importance.LOW,
+                        ACCESS_CONTROL_ALLOW_ORIGIN_DOC)
+                .define(ACCESS_CONTROL_ALLOW_METHODS_CONFIG, Type.STRING,
+                        ACCESS_CONTROL_ALLOW_METHODS_DEFAULT, Importance.LOW,
+                        ACCESS_CONTROL_ALLOW_METHODS_DOC)
+                .define(
+                        PLUGIN_PATH_CONFIG,
+                        Type.LIST,
+                        null,
+                        Importance.LOW,
+                        PLUGIN_PATH_DOC
+                );
+    }
+
+    @Override
+    protected Map<String, Object> postProcessParsedConfig(final Map<String, Object> parsedValues) {
+        return CommonClientConfigs.postProcessReconnectBackoffConfigs(this, parsedValues);
+    }
+
+    public static List<String> pluginLocations(Map<String, String> props) {
+        String locationList = props.get(WorkerConfig.PLUGIN_PATH_CONFIG);
+        return locationList == null
+                         ? new ArrayList<String>()
+                         : Arrays.asList(locationList.trim().split("\\s*,\\s*", -1));
     }
 
     public WorkerConfig(ConfigDef definition, Map<String, String> props) {

@@ -21,14 +21,14 @@ import joptsimple.OptionParser
 
 
 class PerfConfig(args: Array[String]) {
-  val parser = new OptionParser
+  val parser = new OptionParser(false)
   val numMessagesOpt = parser.accepts("messages", "REQUIRED: The number of messages to send or consume")
     .withRequiredArg
     .describedAs("count")
     .ofType(classOf[java.lang.Long])
-  val reportingIntervalOpt = parser.accepts("reporting-interval", "Interval at which to print progress info.")
+  val reportingIntervalOpt = parser.accepts("reporting-interval", "Interval in milliseconds at which to print progress info.")
     .withRequiredArg
-    .describedAs("size")
+    .describedAs("interval_ms")
     .ofType(classOf[java.lang.Integer])
     .defaultsTo(5000)
   val dateFormatOpt = parser.accepts("date-format", "The date format to use for formatting the time field. " +

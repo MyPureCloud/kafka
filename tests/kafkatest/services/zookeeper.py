@@ -14,18 +14,19 @@
 # limitations under the License.
 
 
-from ducktape.services.service import Service
-
-from kafkatest.services.kafka.directory import kafka_dir
-from kafkatest.services.security.security_config import SecurityConfig
-from kafkatest.services.kafka.directory import kafka_dir, KAFKA_TRUNK
-
-import subprocess
-import time
 import re
+import time
+
+from ducktape.services.service import Service
+from ducktape.utils.util import wait_until
+from ducktape.cluster.remoteaccount import RemoteCommandError
+
+from kafkatest.directory_layout.kafka_path import KafkaPathResolverMixin
+from kafkatest.services.security.security_config import SecurityConfig
+from kafkatest.version import DEV_BRANCH
 
 
-class ZookeeperService(Service):
+class ZookeeperService(KafkaPathResolverMixin, Service):
 
     logs = {
         "zk_log": {
@@ -46,7 +47,7 @@ class ZookeeperService(Service):
 
     @property
     def security_config(self):
-        return SecurityConfig(zk_sasl=self.zk_sasl)
+        return SecurityConfig(self.context, zk_sasl=self.zk_sasl)
 
     @property
     def security_system_properties(self):
@@ -72,19 +73,29 @@ class ZookeeperService(Service):
         self.logger.info(config_file)
         node.account.create_file("/mnt/zookeeper.properties", config_file)
 
-        start_cmd = "export KAFKA_OPTS=\"%s\";" % self.kafka_opts 
-        start_cmd += "/opt/%s/bin/zookeeper-server-start.sh " % kafka_dir(node)
+        start_cmd = "export KAFKA_OPTS=\"%s\";" % (self.kafka_opts + ' ' + self.security_system_properties) \
+            if self.security_config.zk_sasl else self.kafka_opts
+        start_cmd += "%s " % self.path.script("zookeeper-server-start.sh", node)
         start_cmd += "/mnt/zookeeper.properties 1>> %(path)s 2>> %(path)s &" % self.logs["zk_log"]
         node.account.ssh(start_cmd)
 
-        time.sleep(5)  # give it some time to start
+        wait_until(lambda: self.listening(node), timeout_sec=30, err_msg="Zookeeper node failed to start")
+
+    def listening(self, node):
+        try:
+            cmd = "nc -z %s %s" % (node.account.hostname, 2181)
+            node.account.ssh_output(cmd, allow_fail=False)
+            self.logger.debug("Zookeeper started accepting connections at: '%s:%s')", node.account.hostname, 2181)
+            return True
+        except (RemoteCommandError, ValueError) as e:
+            return False
 
     def pids(self, node):
         try:
             cmd = "ps ax | grep -i zookeeper | grep java | grep -v grep | awk '{print $1}'"
             pid_arr = [pid for pid in node.account.ssh_capture(cmd, allow_fail=True, callback=int)]
             return pid_arr
-        except (subprocess.CalledProcessError, ValueError) as e:
+        except (RemoteCommandError, ValueError) as e:
             return []
 
     def alive(self, node):
@@ -94,6 +105,7 @@ class ZookeeperService(Service):
         idx = self.idx(node)
         self.logger.info("Stopping %s node %d on %s" % (type(self).__name__, idx, node.account.hostname))
         node.account.kill_process("zookeeper", allow_fail=False)
+        wait_until(lambda: not self.alive(node), timeout_sec=5, err_msg="Timed out waiting for zookeeper to stop.")
 
     def clean_node(self, node):
         self.logger.info("Cleaning ZK node %d on %s", self.idx(node), node.account.hostname)
@@ -103,24 +115,35 @@ class ZookeeperService(Service):
         node.account.kill_process("zookeeper", clean_shutdown=False, allow_fail=True)
         node.account.ssh("rm -rf /mnt/zookeeper /mnt/zookeeper.properties /mnt/zk.log", allow_fail=False)
 
-    def connect_setting(self):
-        return ','.join([node.account.hostname + ':2181' for node in self.nodes])
+
+    def connect_setting(self, chroot=None):
+        if chroot and not chroot.startswith("/"):
+            raise Exception("ZK chroot must start with '/', invalid chroot: %s" % chroot)
+
+        chroot = '' if chroot is None else chroot
+        return ','.join([node.account.hostname + ':2181' + chroot for node in self.nodes])
 
     #
     # This call is used to simulate a rolling upgrade to enable/disable
     # the use of ZooKeeper ACLs.
     #
     def zookeeper_migration(self, node, zk_acl):
-        la_migra_cmd = "/opt/%s/bin/zookeeper-security-migration.sh --zookeeper.acl=%s --zookeeper.connect=%s" % (kafka_dir(node), zk_acl, self.connect_setting())
+        la_migra_cmd = "%s --zookeeper.acl=%s --zookeeper.connect=%s" % \
+                       (self.path.script("zookeeper-security-migration.sh", node), zk_acl, self.connect_setting())
         node.account.ssh(la_migra_cmd)
 
-    def query(self, path):
+    def query(self, path, chroot=None):
         """
         Queries zookeeper for data associated with 'path' and returns all fields in the schema
         """
-        kafka_dir = KAFKA_TRUNK
-        cmd = "/opt/%s/bin/kafka-run-class.sh kafka.tools.ZooKeeperMainWrapper -server %s get %s" % \
-              (kafka_dir, self.connect_setting(), path)
+        if chroot and not chroot.startswith("/"):
+            raise Exception("ZK chroot must start with '/', invalid chroot: %s" % chroot)
+
+        chroot_path = ('' if chroot is None else chroot) + path
+
+        kafka_run_class = self.path.script("kafka-run-class.sh", DEV_BRANCH)
+        cmd = "%s kafka.tools.ZooKeeperMainWrapper -server %s get %s" % \
+              (kafka_run_class, self.connect_setting(), chroot_path)
         self.logger.debug(cmd)
 
         node = self.nodes[0]

@@ -18,12 +18,15 @@
 package kafka.api
 
 import java.nio.ByteBuffer
+import kafka.message.Message
+import org.apache.kafka.common.protocol.Errors
+
 import scala.collection.Map
-import kafka.common.{TopicAndPartition, ErrorMapping}
+import kafka.common.TopicAndPartition
 import kafka.api.ApiUtils._
 
 object ProducerResponse {
-  // readFrom assumes that the response is written using V1 format
+  // readFrom assumes that the response is written using V2 format
   def readFrom(buffer: ByteBuffer): ProducerResponse = {
     val correlationId = buffer.getInt
     val topicCount = buffer.getInt
@@ -32,9 +35,10 @@ object ProducerResponse {
       val partitionCount = buffer.getInt
       (1 to partitionCount).map(_ => {
         val partition = buffer.getInt
-        val error = buffer.getShort
+        val error = Errors.forCode(buffer.getShort)
         val offset = buffer.getLong
-        (TopicAndPartition(topic, partition), ProducerResponseStatus(error, offset))
+        val timestamp = buffer.getLong
+        (TopicAndPartition(topic, partition), ProducerResponseStatus(error, offset, timestamp))
       })
     })
 
@@ -43,7 +47,7 @@ object ProducerResponse {
   }
 }
 
-case class ProducerResponseStatus(var error: Short, offset: Long)
+case class ProducerResponseStatus(var error: Errors, offset: Long, timestamp: Long = Message.NoTimestamp)
 
 case class ProducerResponse(correlationId: Int,
                             status: Map[TopicAndPartition, ProducerResponseStatus],
@@ -56,7 +60,7 @@ case class ProducerResponse(correlationId: Int,
    */
   private lazy val statusGroupedByTopic = status.groupBy(_._1.topic)
 
-  def hasError = status.values.exists(_.error != ErrorMapping.NoError)
+  def hasError = status.values.exists(_.error != Errors.NONE)
 
   val sizeInBytes = {
     val throttleTimeSize = if (requestVersion > 0) 4 else 0
@@ -70,7 +74,8 @@ case class ProducerResponse(correlationId: Int,
       currTopic._2.size * {
         4 + /* partition id */
         2 + /* error code */
-        8 /* offset */
+        8 + /* offset */
+        8 /* timestamp */
       }
     }) +
     throttleTimeSize
@@ -86,10 +91,11 @@ case class ProducerResponse(correlationId: Int,
       writeShortString(buffer, topic)
       buffer.putInt(errorsAndOffsets.size) // partition count
       errorsAndOffsets.foreach {
-        case((TopicAndPartition(_, partition), ProducerResponseStatus(error, nextOffset))) =>
+        case((TopicAndPartition(_, partition), ProducerResponseStatus(error, nextOffset, timestamp))) =>
           buffer.putInt(partition)
-          buffer.putShort(error)
+          buffer.putShort(error.code)
           buffer.putLong(nextOffset)
+          buffer.putLong(timestamp)
       }
     })
     // Throttle time is only supported on V1 style requests

@@ -24,10 +24,10 @@ import kafka.common.{TopicAndPartition, _}
 import kafka.network.{RequestOrResponseSend, RequestChannel}
 import kafka.network.RequestChannel.Response
 import kafka.utils.Logging
-import org.apache.kafka.common.protocol.ApiKeys
+import org.apache.kafka.common.protocol.{ApiKeys, Errors}
 
 object OffsetFetchRequest extends Logging {
-  val CurrentVersion: Short = 1
+  val CurrentVersion: Short = 2
   val DefaultClientId = ""
 
   def readFrom(buffer: ByteBuffer): OffsetFetchRequest = {
@@ -90,14 +90,21 @@ case class OffsetFetchRequest(groupId: String,
       t._2.size * 4 /* partition */
     })
 
-  override  def handleError(e: Throwable, requestChannel: RequestChannel, request: RequestChannel.Request): Unit = {
-    val responseMap = requestInfo.map {
-      case (topicAndPartition) => (topicAndPartition, OffsetMetadataAndError(
-        ErrorMapping.codeFor(e.getClass.asInstanceOf[Class[Throwable]])
-      ))
-    }.toMap
-    val errorResponse = OffsetFetchResponse(requestInfo=responseMap, correlationId=correlationId)
-    requestChannel.sendResponse(new Response(request, new RequestOrResponseSend(request.connectionId, errorResponse)))
+  override def handleError(e: Throwable, requestChannel: RequestChannel, request: RequestChannel.Request): Unit = {
+    val requestVersion = request.header.apiVersion
+
+    val thrownError = Errors.forException(e)
+    val responseMap =
+      if (requestVersion < 2) {
+        requestInfo.map {
+          topicAndPartition => (topicAndPartition, OffsetMetadataAndError(thrownError))
+        }.toMap
+      } else {
+        Map[kafka.common.TopicAndPartition, kafka.common.OffsetMetadataAndError]()
+      }
+
+    val errorResponse = OffsetFetchResponse(requestInfo=responseMap, correlationId=correlationId, error=thrownError)
+    requestChannel.sendResponse(Response(request, new RequestOrResponseSend(request.connectionId, errorResponse)))
   }
 
   override def describe(details: Boolean): String = {
@@ -107,7 +114,7 @@ case class OffsetFetchRequest(groupId: String,
     offsetFetchRequest.append("; CorrelationId: " + correlationId)
     offsetFetchRequest.append("; ClientId: " + clientId)
     offsetFetchRequest.append("; GroupId: " + groupId)
-    if(details)
+    if (details)
       offsetFetchRequest.append("; RequestInfo: " + requestInfo.mkString(","))
     offsetFetchRequest.toString()
   }

@@ -1,10 +1,10 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with
+ * contributor license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright ownership.
  * The ASF licenses this file to You under the Apache License, Version 2.0
  * (the "License"); you may not use this file except in compliance with
- * the License.  You may obtain a copy of the License at
+ * the License. You may obtain a copy of the License at
  *
  *    http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -14,7 +14,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.kafka.test;
 
 import org.apache.kafka.common.serialization.Deserializer;
@@ -25,11 +24,14 @@ import org.apache.kafka.streams.processor.StateStore;
 import org.apache.kafka.streams.processor.StateStoreSupplier;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Map;
 
 public class MockStateStoreSupplier implements StateStoreSupplier {
-    private final String name;
-    private final boolean persistent;
-    private final boolean loggingEnabled;
+    private String name;
+    private boolean persistent;
+    private boolean loggingEnabled;
+    private MockStateStore stateStore;
 
     public MockStateStoreSupplier(String name, boolean persistent) {
         this(name, persistent, true);
@@ -41,6 +43,10 @@ public class MockStateStoreSupplier implements StateStoreSupplier {
         this.loggingEnabled = loggingEnabled;
     }
 
+    public MockStateStoreSupplier(final MockStateStore stateStore) {
+        this.stateStore = stateStore;
+    }
+
     @Override
     public String name() {
         return name;
@@ -48,21 +54,34 @@ public class MockStateStoreSupplier implements StateStoreSupplier {
 
     @Override
     public StateStore get() {
-        if (loggingEnabled) {
-            return new MockStateStore(name, persistent);
-        } else {
-            return new MockStateStore(name, persistent).disableLogging();
+        if (stateStore != null) {
+            return stateStore;
         }
+        if (loggingEnabled) {
+            return new MockStateStore(name, persistent).enableLogging();
+        } else {
+            return new MockStateStore(name, persistent);
+        }
+    }
+
+    @Override
+    public Map<String, String> logConfig() {
+        return Collections.emptyMap();
+    }
+
+    @Override
+    public boolean loggingEnabled() {
+        return loggingEnabled;
     }
 
     public static class MockStateStore implements StateStore {
         private final String name;
         private final boolean persistent;
 
-        public boolean loggingEnabled = true;
+        public boolean loggingEnabled = false;
         public boolean initialized = false;
         public boolean flushed = false;
-        public boolean closed = false;
+        public boolean closed = true;
         public final ArrayList<Integer> keys = new ArrayList<>();
 
         public MockStateStore(String name, boolean persistent) {
@@ -70,8 +89,8 @@ public class MockStateStoreSupplier implements StateStoreSupplier {
             this.persistent = persistent;
         }
 
-        public MockStateStore disableLogging() {
-            loggingEnabled = false;
+        public MockStateStore enableLogging() {
+            loggingEnabled = true;
             return this;
         }
 
@@ -81,9 +100,10 @@ public class MockStateStoreSupplier implements StateStoreSupplier {
         }
 
         @Override
-        public void init(ProcessorContext context) {
-            context.register(this, loggingEnabled, stateRestoreCallback);
+        public void init(ProcessorContext context, StateStore root) {
+            context.register(root, loggingEnabled, stateRestoreCallback);
             initialized = true;
+            closed = false;
         }
 
         @Override
@@ -99,6 +119,11 @@ public class MockStateStoreSupplier implements StateStoreSupplier {
         @Override
         public boolean persistent() {
             return persistent;
+        }
+
+        @Override
+        public boolean isOpen() {
+            return !closed;
         }
 
         public final StateRestoreCallback stateRestoreCallback = new StateRestoreCallback() {
