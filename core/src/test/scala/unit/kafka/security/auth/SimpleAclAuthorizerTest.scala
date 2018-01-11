@@ -31,6 +31,7 @@ import org.junit.{After, Before, Test}
 class SimpleAclAuthorizerTest extends ZooKeeperTestHarness {
 
   val simpleAclAuthorizer = new SimpleAclAuthorizer
+  val simpleAclAuthorizer2 = new SimpleAclAuthorizer
   val testPrincipal = Acl.WildCardPrincipal
   val testHostName = InetAddress.getByName("192.168.0.1")
   val session = new Session(testPrincipal, testHostName)
@@ -43,17 +44,24 @@ class SimpleAclAuthorizerTest extends ZooKeeperTestHarness {
   override def setUp() {
     super.setUp()
 
+    // Increase maxUpdateRetries to avoid transient failures
+    simpleAclAuthorizer.maxUpdateRetries = Int.MaxValue
+    simpleAclAuthorizer2.maxUpdateRetries = Int.MaxValue
+
     val props = TestUtils.createBrokerConfig(0, zkConnect)
     props.put(SimpleAclAuthorizer.SuperUsersProp, superUsers)
 
     config = KafkaConfig.fromProps(props)
     simpleAclAuthorizer.configure(config.originals)
+    simpleAclAuthorizer2.configure(config.originals)
     resource = new Resource(Topic, UUID.randomUUID().toString)
   }
 
   @After
   override def tearDown(): Unit = {
     simpleAclAuthorizer.close()
+    simpleAclAuthorizer2.close()
+    super.tearDown()
   }
 
   @Test
@@ -182,9 +190,13 @@ class SimpleAclAuthorizerTest extends ZooKeeperTestHarness {
     props.put(SimpleAclAuthorizer.AllowEveryoneIfNoAclIsFoundProp, "true")
 
     val cfg = KafkaConfig.fromProps(props)
-    val testAuthoizer: SimpleAclAuthorizer = new SimpleAclAuthorizer
-    testAuthoizer.configure(cfg.originals)
-    assertTrue("when acls = null or [],  authorizer should fail open with allow.everyone = true.", testAuthoizer.authorize(session, Read, resource))
+    val testAuthorizer = new SimpleAclAuthorizer
+    try {
+      testAuthorizer.configure(cfg.originals)
+      assertTrue("when acls = null or [],  authorizer should fail open with allow.everyone = true.", testAuthorizer.authorize(session, Read, resource))
+    } finally {
+      testAuthorizer.close()
+    }
   }
 
   @Test
@@ -248,10 +260,163 @@ class SimpleAclAuthorizerTest extends ZooKeeperTestHarness {
 
     zkUtils.deletePathRecursive(SimpleAclAuthorizer.AclChangedZkPath)
     val authorizer = new SimpleAclAuthorizer
-    authorizer.configure(config.originals)
+    try {
+      authorizer.configure(config.originals)
 
-    assertEquals(acls, authorizer.getAcls(resource))
-    assertEquals(acls1, authorizer.getAcls(resource1))
+      assertEquals(acls, authorizer.getAcls(resource))
+      assertEquals(acls1, authorizer.getAcls(resource1))
+    } finally {
+      authorizer.close()
+    }
+  }
+
+  @Test
+  def testLocalConcurrentModificationOfResourceAcls() {
+    val commonResource = new Resource(Topic, "test")
+
+    val user1 = new KafkaPrincipal(KafkaPrincipal.USER_TYPE, username)
+    val acl1 = new Acl(user1, Allow, WildCardHost, Read)
+
+    val user2 = new KafkaPrincipal(KafkaPrincipal.USER_TYPE, "bob")
+    val acl2 = new Acl(user2, Deny, WildCardHost, Read)
+
+    simpleAclAuthorizer.addAcls(Set(acl1), commonResource)
+    simpleAclAuthorizer.addAcls(Set(acl2), commonResource)
+
+    TestUtils.waitAndVerifyAcls(Set(acl1, acl2), simpleAclAuthorizer, commonResource)
+  }
+
+  @Test
+  def testDistributedConcurrentModificationOfResourceAcls() {
+    val commonResource = new Resource(Topic, "test")
+
+    val user1 = new KafkaPrincipal(KafkaPrincipal.USER_TYPE, username)
+    val acl1 = new Acl(user1, Allow, WildCardHost, Read)
+
+    val user2 = new KafkaPrincipal(KafkaPrincipal.USER_TYPE, "bob")
+    val acl2 = new Acl(user2, Deny, WildCardHost, Read)
+
+    // Add on each instance
+    simpleAclAuthorizer.addAcls(Set(acl1), commonResource)
+    simpleAclAuthorizer2.addAcls(Set(acl2), commonResource)
+
+    TestUtils.waitAndVerifyAcls(Set(acl1, acl2), simpleAclAuthorizer, commonResource)
+    TestUtils.waitAndVerifyAcls(Set(acl1, acl2), simpleAclAuthorizer2, commonResource)
+
+    val user3 = new KafkaPrincipal(KafkaPrincipal.USER_TYPE, "joe")
+    val acl3 = new Acl(user3, Deny, WildCardHost, Read)
+
+    // Add on one instance and delete on another
+    simpleAclAuthorizer.addAcls(Set(acl3), commonResource)
+    val deleted = simpleAclAuthorizer2.removeAcls(Set(acl3), commonResource)
+
+    assertTrue("The authorizer should see a value that needs to be deleted", deleted)
+
+    TestUtils.waitAndVerifyAcls(Set(acl1, acl2), simpleAclAuthorizer, commonResource)
+    TestUtils.waitAndVerifyAcls(Set(acl1, acl2), simpleAclAuthorizer2, commonResource)
+  }
+
+  @Test
+  def testHighConcurrencyModificationOfResourceAcls() {
+    val commonResource = new Resource(Topic, "test")
+
+    val acls = (0 to 50).map { i =>
+      val useri = new KafkaPrincipal(KafkaPrincipal.USER_TYPE, i.toString)
+      new Acl(useri, Allow, WildCardHost, Read)
+    }
+
+    // Alternate authorizer, Remove all acls that end in 0
+    val concurrentFuctions = acls.map { acl =>
+      () => {
+        val aclId = acl.principal.getName.toInt
+        if (aclId % 2 == 0) {
+          simpleAclAuthorizer.addAcls(Set(acl), commonResource)
+        } else {
+          simpleAclAuthorizer2.addAcls(Set(acl), commonResource)
+        }
+        if (aclId % 10 == 0) {
+          simpleAclAuthorizer2.removeAcls(Set(acl), commonResource)
+        }
+      }
+    }
+
+    val expectedAcls = acls.filter { acl =>
+      val aclId = acl.principal.getName.toInt
+      aclId % 10 != 0
+    }.toSet
+
+    TestUtils.assertConcurrent("Should support many concurrent calls", concurrentFuctions, 30 * 1000)
+
+    TestUtils.waitAndVerifyAcls(expectedAcls, simpleAclAuthorizer, commonResource)
+    TestUtils.waitAndVerifyAcls(expectedAcls, simpleAclAuthorizer2, commonResource)
+  }
+
+  /**
+    * Test ACL inheritance, as described in #{org.apache.kafka.common.acl.AclOperation}
+    */
+  @Test
+  def testAclInheritance(): Unit = {
+    testImplicationsOfAllow(All, Set(Read, Write, Create, Delete, Alter, Describe,
+      ClusterAction, DescribeConfigs, AlterConfigs, IdempotentWrite))
+    testImplicationsOfDeny(All, Set(Read, Write, Create, Delete, Alter, Describe,
+      ClusterAction, DescribeConfigs, AlterConfigs, IdempotentWrite))
+    testImplicationsOfAllow(Read, Set(Describe))
+    testImplicationsOfAllow(Write, Set(Describe))
+    testImplicationsOfAllow(Delete, Set(Describe))
+    testImplicationsOfAllow(Alter, Set(Describe))
+    testImplicationsOfDeny(Describe, Set())
+    testImplicationsOfAllow(AlterConfigs, Set(DescribeConfigs))
+    testImplicationsOfDeny(DescribeConfigs, Set())
+  }
+
+  private def testImplicationsOfAllow(parentOp: Operation, allowedOps: Set[Operation]): Unit = {
+    val user = new KafkaPrincipal(KafkaPrincipal.USER_TYPE, username)
+    val host = InetAddress.getByName("192.168.3.1")
+    val hostSession = Session(user, host)
+    val acl = Acl(user, Allow, WildCardHost, parentOp)
+    simpleAclAuthorizer.addAcls(Set(acl), Resource.ClusterResource)
+    Operation.values.foreach { op =>
+      val authorized = simpleAclAuthorizer.authorize(hostSession, op, Resource.ClusterResource)
+      if (allowedOps.contains(op) || op == parentOp)
+        assertTrue(s"ALLOW $parentOp should imply ALLOW $op", authorized)
+      else
+        assertFalse(s"ALLOW $parentOp should not imply ALLOW $op", authorized)
+    }
+    simpleAclAuthorizer.removeAcls(Set(acl), Resource.ClusterResource)
+  }
+
+  private def testImplicationsOfDeny(parentOp: Operation, deniedOps: Set[Operation]): Unit = {
+    val user1 = new KafkaPrincipal(KafkaPrincipal.USER_TYPE, username)
+    val host1 = InetAddress.getByName("192.168.3.1")
+    val host1Session = Session(user1, host1)
+    val acls = Set(Acl(user1, Deny, WildCardHost, parentOp), Acl(user1, Allow, WildCardHost, All))
+    simpleAclAuthorizer.addAcls(acls, Resource.ClusterResource)
+    Operation.values.foreach { op =>
+      val authorized = simpleAclAuthorizer.authorize(host1Session, op, Resource.ClusterResource)
+      if (deniedOps.contains(op) || op == parentOp)
+        assertFalse(s"DENY $parentOp should imply DENY $op", authorized)
+      else
+        assertTrue(s"DENY $parentOp should not imply DENY $op", authorized)
+    }
+    simpleAclAuthorizer.removeAcls(acls, Resource.ClusterResource)
+  }
+
+  @Test
+  def testHighConcurrencyDeletionOfResourceAcls() {
+    val acl = new Acl(new KafkaPrincipal(KafkaPrincipal.USER_TYPE, username), Allow, WildCardHost, All)
+
+    // Alternate authorizer to keep adding and removing zookeeper path
+    val concurrentFuctions = (0 to 50).map { _ =>
+      () => {
+        simpleAclAuthorizer.addAcls(Set(acl), resource)
+        simpleAclAuthorizer2.removeAcls(Set(acl), resource)
+      }
+    }
+
+    TestUtils.assertConcurrent("Should support many concurrent calls", concurrentFuctions, 30 * 1000)
+
+    TestUtils.waitAndVerifyAcls(Set.empty[Acl], simpleAclAuthorizer, resource)
+    TestUtils.waitAndVerifyAcls(Set.empty[Acl], simpleAclAuthorizer2, resource)
   }
 
   private def changeAclAndVerify(originalAcls: Set[Acl], addedAcls: Set[Acl], removedAcls: Set[Acl], resource: Resource = resource): Set[Acl] = {

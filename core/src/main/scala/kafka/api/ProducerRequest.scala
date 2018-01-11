@@ -5,7 +5,7 @@
  * The ASF licenses this file to You under the Apache License, Version 2.0
  * (the "License"); you may not use this file except in compliance with
  * the License.  You may obtain a copy of the License at
- *
+ * 
  *    http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
@@ -24,10 +24,10 @@ import kafka.common._
 import kafka.message._
 import kafka.network.{RequestOrResponseSend, RequestChannel}
 import kafka.network.RequestChannel.Response
-import org.apache.kafka.common.protocol.ApiKeys
+import org.apache.kafka.common.protocol.{ApiKeys, Errors}
 
 object ProducerRequest {
-  val CurrentVersion = 1.shortValue
+  val CurrentVersion = 2.shortValue
 
   def readFrom(buffer: ByteBuffer): ProducerRequest = {
     val versionId: Short = buffer.getShort
@@ -124,21 +124,20 @@ case class ProducerRequest(versionId: Short = ProducerRequest.CurrentVersion,
 
   def numPartitions = data.size
 
-  override def toString(): String = {
+  override def toString: String = {
     describe(true)
   }
 
-  override  def handleError(e: Throwable, requestChannel: RequestChannel, request: RequestChannel.Request): Unit = {
-    if(request.requestObj.asInstanceOf[ProducerRequest].requiredAcks == 0) {
-        requestChannel.closeConnection(request.processor, request)
+  override def handleError(e: Throwable, requestChannel: RequestChannel, request: RequestChannel.Request): Unit = {
+    if (request.body[org.apache.kafka.common.requests.ProduceRequest].acks == 0) {
+        requestChannel.sendResponse(new RequestChannel.Response(request, None, RequestChannel.CloseConnectionAction))
     }
     else {
-      val producerResponseStatus = data.map {
-        case (topicAndPartition, data) =>
-          (topicAndPartition, ProducerResponseStatus(ErrorMapping.codeFor(e.getClass.asInstanceOf[Class[Throwable]]), -1l))
+      val producerResponseStatus = data.map { case (topicAndPartition, _) =>
+        (topicAndPartition, ProducerResponseStatus(Errors.forException(e), -1l, Message.NoTimestamp))
       }
       val errorResponse = ProducerResponse(correlationId, producerResponseStatus)
-      requestChannel.sendResponse(new Response(request, new RequestOrResponseSend(request.connectionId, errorResponse)))
+      requestChannel.sendResponse(Response(request, new RequestOrResponseSend(request.connectionId, errorResponse)))
     }
   }
 

@@ -1,10 +1,10 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with
+ * contributor license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright ownership.
  * The ASF licenses this file to You under the Apache License, Version 2.0
  * (the "License"); you may not use this file except in compliance with
- * the License.  You may obtain a copy of the License at
+ * the License. You may obtain a copy of the License at
  *
  *    http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -13,8 +13,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- **/
-
+ */
 package org.apache.kafka.connect.runtime.distributed;
 
 import org.apache.kafka.common.protocol.types.ArrayOf;
@@ -83,10 +82,10 @@ public class ConnectProtocol {
     }
 
     public static WorkerState deserializeMetadata(ByteBuffer buffer) {
-        Struct header = (Struct) CONNECT_PROTOCOL_HEADER_SCHEMA.read(buffer);
+        Struct header = CONNECT_PROTOCOL_HEADER_SCHEMA.read(buffer);
         Short version = header.getShort(VERSION_KEY_NAME);
         checkVersionCompatibility(version);
-        Struct struct = (Struct) CONFIG_STATE_V0.read(buffer);
+        Struct struct = CONFIG_STATE_V0.read(buffer);
         long configOffset = struct.getLong(CONFIG_OFFSET_KEY_NAME);
         String url = struct.getString(URL_KEY_NAME);
         return new WorkerState(url, configOffset);
@@ -116,10 +115,10 @@ public class ConnectProtocol {
     }
 
     public static Assignment deserializeAssignment(ByteBuffer buffer) {
-        Struct header = (Struct) CONNECT_PROTOCOL_HEADER_SCHEMA.read(buffer);
+        Struct header = CONNECT_PROTOCOL_HEADER_SCHEMA.read(buffer);
         Short version = header.getShort(VERSION_KEY_NAME);
         checkVersionCompatibility(version);
-        Struct struct = (Struct) ASSIGNMENT_V0.read(buffer);
+        Struct struct = ASSIGNMENT_V0.read(buffer);
         short error = struct.getShort(ERROR_KEY_NAME);
         String leader = struct.getString(LEADER_KEY_NAME);
         String leaderUrl = struct.getString(LEADER_URL_KEY_NAME);

@@ -1,10 +1,10 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with
+ * contributor license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright ownership.
  * The ASF licenses this file to You under the Apache License, Version 2.0
  * (the "License"); you may not use this file except in compliance with
- * the License.  You may obtain a copy of the License at
+ * the License. You may obtain a copy of the License at
  *
  *    http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -13,9 +13,20 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- **/
-
+ */
 package org.apache.kafka.connect.file;
+
+import java.io.BufferedReader;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
 
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.errors.ConnectException;
@@ -23,9 +34,6 @@ import org.apache.kafka.connect.source.SourceRecord;
 import org.apache.kafka.connect.source.SourceTask;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.io.*;
-import java.util.*;
 
 /**
  * FileStreamSourceTask reads from stdin or a file.
@@ -57,7 +65,7 @@ public class FileStreamSourceTask extends SourceTask {
             stream = System.in;
             // Tracking offset for stdin doesn't make sense
             streamOffset = null;
-            reader = new BufferedReader(new InputStreamReader(stream));
+            reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8));
         }
         topic = props.get(FileStreamSourceConnector.TOPIC_CONFIG);
         if (topic == null)
@@ -92,10 +100,10 @@ public class FileStreamSourceTask extends SourceTask {
                 } else {
                     streamOffset = 0L;
                 }
-                reader = new BufferedReader(new InputStreamReader(stream));
+                reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8));
                 log.debug("Opened {} for reading", logFilename());
             } catch (FileNotFoundException e) {
-                log.warn("Couldn't find file for FileStreamSourceTask, sleeping to wait for it to be created");
+                log.warn("Couldn't find file {} for FileStreamSourceTask, sleeping to wait for it to be created", logFilename());
                 synchronized (this) {
                     this.wait(1000);
                 }
@@ -136,9 +144,9 @@ public class FileStreamSourceTask extends SourceTask {
                             log.trace("Read a line from {}", logFilename());
                             if (records == null)
                                 records = new ArrayList<>();
-                            records.add(new SourceRecord(offsetKey(filename), offsetValue(streamOffset), topic, VALUE_SCHEMA, line));
+                            records.add(new SourceRecord(offsetKey(filename), offsetValue(streamOffset), topic, null,
+                                    null, null, VALUE_SCHEMA, line, System.currentTimeMillis()));
                         }
-                        new ArrayList<SourceRecord>();
                     } while (line != null);
                 }
             }

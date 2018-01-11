@@ -1,10 +1,10 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with
+ * contributor license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright ownership.
  * The ASF licenses this file to You under the Apache License, Version 2.0
  * (the "License"); you may not use this file except in compliance with
- * the License.  You may obtain a copy of the License at
+ * the License. You may obtain a copy of the License at
  *
  *    http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -13,19 +13,20 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- **/
-
+ */
 package org.apache.kafka.connect.runtime.rest;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.jaxrs.json.JacksonJsonProvider;
+
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.runtime.Herder;
 import org.apache.kafka.connect.runtime.WorkerConfig;
 import org.apache.kafka.connect.runtime.rest.entities.ErrorMessage;
 import org.apache.kafka.connect.runtime.rest.errors.ConnectExceptionMapper;
 import org.apache.kafka.connect.runtime.rest.errors.ConnectRestException;
+import org.apache.kafka.connect.runtime.rest.resources.ConnectorPluginsResource;
 import org.apache.kafka.connect.runtime.rest.resources.ConnectorsResource;
 import org.apache.kafka.connect.runtime.rest.resources.RootResource;
 import org.eclipse.jetty.server.Connector;
@@ -37,22 +38,29 @@ import org.eclipse.jetty.server.handler.DefaultHandler;
 import org.eclipse.jetty.server.handler.HandlerCollection;
 import org.eclipse.jetty.server.handler.RequestLogHandler;
 import org.eclipse.jetty.server.handler.StatisticsHandler;
+import org.eclipse.jetty.servlet.FilterHolder;
 import org.eclipse.jetty.servlet.ServletContextHandler;
 import org.eclipse.jetty.servlet.ServletHolder;
+import org.eclipse.jetty.servlets.CrossOriginFilter;
 import org.glassfish.jersey.server.ResourceConfig;
 import org.glassfish.jersey.servlet.ServletContainer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import javax.ws.rs.core.Response;
-import javax.ws.rs.core.UriBuilder;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.URI;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
+
+import javax.servlet.DispatcherType;
+import javax.ws.rs.core.Response;
+import javax.ws.rs.core.UriBuilder;
 
 /**
  * Embedded server for the REST API that provides the control plane for Kafka Connect workers.
@@ -65,7 +73,6 @@ public class RestServer {
     private static final ObjectMapper JSON_SERDE = new ObjectMapper();
 
     private final WorkerConfig config;
-    private Herder herder;
     private Server jettyServer;
 
     /**
@@ -90,13 +97,12 @@ public class RestServer {
     public void start(Herder herder) {
         log.info("Starting REST server");
 
-        this.herder = herder;
-
         ResourceConfig resourceConfig = new ResourceConfig();
         resourceConfig.register(new JacksonJsonProvider());
 
         resourceConfig.register(RootResource.class);
         resourceConfig.register(new ConnectorsResource(herder));
+        resourceConfig.register(new ConnectorPluginsResource(herder));
 
         resourceConfig.register(ConnectExceptionMapper.class);
 
@@ -106,6 +112,18 @@ public class RestServer {
         ServletContextHandler context = new ServletContextHandler(ServletContextHandler.SESSIONS);
         context.setContextPath("/");
         context.addServlet(servletHolder, "/*");
+
+        String allowedOrigins = config.getString(WorkerConfig.ACCESS_CONTROL_ALLOW_ORIGIN_CONFIG);
+        if (allowedOrigins != null && !allowedOrigins.trim().isEmpty()) {
+            FilterHolder filterHolder = new FilterHolder(new CrossOriginFilter());
+            filterHolder.setName("cross-origin");
+            filterHolder.setInitParameter(CrossOriginFilter.ALLOWED_ORIGINS_PARAM, allowedOrigins);
+            String allowedMethods = config.getString(WorkerConfig.ACCESS_CONTROL_ALLOW_METHODS_CONFIG);
+            if (allowedMethods != null && !allowedOrigins.trim().isEmpty()) {
+                filterHolder.setInitParameter(CrossOriginFilter.ALLOWED_METHODS_PARAM, allowedMethods);
+            }
+            context.addFilter(filterHolder, "/*", EnumSet.of(DispatcherType.REQUEST));
+        }
 
         RequestLogHandler requestLogHandler = new RequestLogHandler();
         Slf4jRequestLog requestLog = new Slf4jRequestLog();
@@ -151,7 +169,7 @@ public class RestServer {
      * Get the URL to advertise to other workers and clients. This uses the default connector from the embedded Jetty
      * server, unless overrides for advertised hostname and/or port are provided via configs.
      */
-    public String advertisedUrl() {
+    public URI advertisedUrl() {
         UriBuilder builder = UriBuilder.fromUri(jettyServer.getURI());
         String advertisedHostname = config.getString(WorkerConfig.REST_ADVERTISED_HOST_NAME_CONFIG);
         if (advertisedHostname != null && !advertisedHostname.isEmpty())
@@ -161,9 +179,8 @@ public class RestServer {
             builder.port(advertisedPort);
         else
             builder.port(config.getInt(WorkerConfig.REST_PORT_CONFIG));
-        return builder.build().toString();
+        return builder.build();
     }
-
 
     /**
      * @param url               HTTP connection will be established with this url.
@@ -197,7 +214,7 @@ public class RestServer {
                 connection.setDoOutput(true);
 
                 OutputStream os = connection.getOutputStream();
-                os.write(serializedBody.getBytes());
+                os.write(serializedBody.getBytes(StandardCharsets.UTF_8));
                 os.flush();
                 os.close();
             }
@@ -259,4 +276,5 @@ public class RestServer {
         else
             return base + path;
     }
+
 }

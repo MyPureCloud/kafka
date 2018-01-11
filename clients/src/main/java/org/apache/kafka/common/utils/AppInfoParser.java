@@ -1,10 +1,10 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with
+ * contributor license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright ownership.
  * The ASF licenses this file to You under the Apache License, Version 2.0
  * (the "License"); you may not use this file except in compliance with
- * the License.  You may obtain a copy of the License at
+ * the License. You may obtain a copy of the License at
  *
  *    http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.common.utils;
 
+import java.io.InputStream;
 import java.lang.management.ManagementFactory;
 import java.util.Properties;
 
@@ -28,29 +29,29 @@ import org.slf4j.LoggerFactory;
 
 public class AppInfoParser {
     private static final Logger log = LoggerFactory.getLogger(AppInfoParser.class);
-    private static String version = "unknown";
-    private static String commitId = "unknown";
+    private static final String VERSION;
+    private static final String COMMIT_ID;
 
     static {
-        try {
-            Properties props = new Properties();
-            props.load(AppInfoParser.class.getResourceAsStream("/kafka/kafka-version.properties"));
-            version = props.getProperty("version", version).trim();
-            commitId = props.getProperty("commitId", commitId).trim();
+        Properties props = new Properties();
+        try (InputStream resourceStream = AppInfoParser.class.getResourceAsStream("/kafka/kafka-version.properties")) {
+            props.load(resourceStream);
         } catch (Exception e) {
             log.warn("Error while loading kafka-version.properties :" + e.getMessage());
         }
+        VERSION = props.getProperty("version", "unknown").trim();
+        COMMIT_ID = props.getProperty("commitId", "unknown").trim();
     }
 
     public static String getVersion() {
-        return version;
+        return VERSION;
     }
 
     public static String getCommitId() {
-        return commitId;
+        return COMMIT_ID;
     }
 
-    public static void registerAppInfo(String prefix, String id) {
+    public static synchronized void registerAppInfo(String prefix, String id) {
         try {
             ObjectName name = new ObjectName(prefix + ":type=app-info,id=" + id);
             AppInfo mBean = new AppInfo();
@@ -60,7 +61,7 @@ public class AppInfoParser {
         }
     }
 
-    public static void unregisterAppInfo(String prefix, String id) {
+    public static synchronized void unregisterAppInfo(String prefix, String id) {
         MBeanServer server = ManagementFactory.getPlatformMBeanServer();
         try {
             ObjectName name = new ObjectName(prefix + ":type=app-info,id=" + id);

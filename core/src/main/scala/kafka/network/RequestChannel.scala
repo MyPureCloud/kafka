@@ -19,151 +19,204 @@ package kafka.network
 
 import java.net.InetAddress
 import java.nio.ByteBuffer
-import java.security.Principal
+import java.util.Collections
 import java.util.concurrent._
 
 import com.yammer.metrics.core.Gauge
-import kafka.api._
-import kafka.common.TopicAndPartition
-import kafka.message.ByteBufferMessageSet
+import kafka.api.{ControlledShutdownRequest, RequestOrResponse}
 import kafka.metrics.KafkaMetricsGroup
-import kafka.utils.{Logging, SystemTime}
-import org.apache.kafka.common.network.Send
-import org.apache.kafka.common.protocol.{ApiKeys, SecurityProtocol}
-import org.apache.kafka.common.requests.{AbstractRequest, RequestHeader}
+import kafka.server.QuotaId
+import kafka.utils.{Logging, NotNothing}
+import org.apache.kafka.common.TopicPartition
+import org.apache.kafka.common.errors.InvalidRequestException
+import org.apache.kafka.common.network.{ListenerName, Send}
+import org.apache.kafka.common.protocol.{ApiKeys, Protocol, SecurityProtocol}
+import org.apache.kafka.common.record.{RecordBatch, MemoryRecords}
+import org.apache.kafka.common.requests._
 import org.apache.kafka.common.security.auth.KafkaPrincipal
+import org.apache.kafka.common.utils.Time
 import org.apache.log4j.Logger
 
+import scala.reflect.ClassTag
 
 object RequestChannel extends Logging {
-  val AllDone = new Request(processor = 1, connectionId = "2", new Session(KafkaPrincipal.ANONYMOUS, InetAddress.getLocalHost()), buffer = getShutdownReceive(), startTimeMs = 0, securityProtocol = SecurityProtocol.PLAINTEXT)
+  val AllDone = Request(processor = 1, connectionId = "2", Session(KafkaPrincipal.ANONYMOUS, InetAddress.getLocalHost),
+    buffer = shutdownReceive, startTimeNanos = 0, listenerName = new ListenerName(""),
+    securityProtocol = SecurityProtocol.PLAINTEXT)
+  private val requestLogger = Logger.getLogger("kafka.request.logger")
 
-  def getShutdownReceive() = {
-    val emptyProducerRequest = new ProducerRequest(0, 0, "", 0, 0, collection.mutable.Map[TopicAndPartition, ByteBufferMessageSet]())
-    val byteBuffer = ByteBuffer.allocate(emptyProducerRequest.sizeInBytes + 2)
-    byteBuffer.putShort(ApiKeys.PRODUCE.id)
-    emptyProducerRequest.writeTo(byteBuffer)
-    byteBuffer.rewind()
-    byteBuffer
+  private def shutdownReceive: ByteBuffer = {
+    val emptyProduceRequest = new ProduceRequest.Builder(RecordBatch.CURRENT_MAGIC_VALUE, 0, 0,
+      Collections.emptyMap[TopicPartition, MemoryRecords]).build()
+    val emptyRequestHeader = new RequestHeader(ApiKeys.PRODUCE.id, emptyProduceRequest.version, "", 0)
+    emptyProduceRequest.serialize(emptyRequestHeader)
   }
 
-  case class Session(principal: KafkaPrincipal, clientAddress: InetAddress)
+  case class Session(principal: KafkaPrincipal, clientAddress: InetAddress) {
+    val sanitizedUser = QuotaId.sanitize(principal.getName)
+  }
 
-  case class Request(processor: Int, connectionId: String, session: Session, private var buffer: ByteBuffer, startTimeMs: Long, securityProtocol: SecurityProtocol) {
+  case class Request(processor: Int, connectionId: String, session: Session, private var buffer: ByteBuffer,
+                     startTimeNanos: Long, listenerName: ListenerName, securityProtocol: SecurityProtocol) {
     // These need to be volatile because the readers are in the network thread and the writers are in the request
     // handler threads or the purgatory threads
-    @volatile var requestDequeueTimeMs = -1L
-    @volatile var apiLocalCompleteTimeMs = -1L
-    @volatile var responseCompleteTimeMs = -1L
-    @volatile var responseDequeueTimeMs = -1L
-    @volatile var apiRemoteCompleteTimeMs = -1L
+    @volatile var requestDequeueTimeNanos = -1L
+    @volatile var apiLocalCompleteTimeNanos = -1L
+    @volatile var responseCompleteTimeNanos = -1L
+    @volatile var responseDequeueTimeNanos = -1L
+    @volatile var apiRemoteCompleteTimeNanos = -1L
+    @volatile var recordNetworkThreadTimeCallback: Option[Long => Unit] = None
 
     val requestId = buffer.getShort()
 
-    // TODO: this will be removed once we migrated to client-side format
-    // for server-side request / response format
-    // NOTE: this map only includes the server-side request/response handlers. Newer
-    // request types should only use the client-side versions which are parsed with
-    // o.a.k.common.requests.AbstractRequest.getRequest()
-    private val keyToNameAndDeserializerMap: Map[Short, (ByteBuffer) => RequestOrResponse]=
-      Map(ApiKeys.PRODUCE.id -> ProducerRequest.readFrom,
-        ApiKeys.FETCH.id -> FetchRequest.readFrom,
-        ApiKeys.LIST_OFFSETS.id -> OffsetRequest.readFrom,
-        ApiKeys.METADATA.id -> TopicMetadataRequest.readFrom,
-        ApiKeys.LEADER_AND_ISR.id -> LeaderAndIsrRequest.readFrom,
-        ApiKeys.STOP_REPLICA.id -> StopReplicaRequest.readFrom,
-        ApiKeys.UPDATE_METADATA_KEY.id -> UpdateMetadataRequest.readFrom,
-        ApiKeys.CONTROLLED_SHUTDOWN_KEY.id -> ControlledShutdownRequest.readFrom,
-        ApiKeys.OFFSET_COMMIT.id -> OffsetCommitRequest.readFrom,
-        ApiKeys.OFFSET_FETCH.id -> OffsetFetchRequest.readFrom
-      )
-
-    // TODO: this will be removed once we migrated to client-side format
-    val requestObj =
-      keyToNameAndDeserializerMap.get(requestId).map(readFrom => readFrom(buffer)).orNull
+    // TODO: this will be removed once we remove support for v0 of ControlledShutdownRequest (which
+    // depends on a non-standard request header)
+    val requestObj: RequestOrResponse = if (requestId == ApiKeys.CONTROLLED_SHUTDOWN_KEY.id)
+      ControlledShutdownRequest.readFrom(buffer)
+    else
+      null
 
     // if we failed to find a server-side mapping, then try using the
     // client-side request / response format
     val header: RequestHeader =
       if (requestObj == null) {
         buffer.rewind
-        RequestHeader.parse(buffer)
+        try RequestHeader.parse(buffer)
+        catch {
+          case ex: Throwable =>
+            throw new InvalidRequestException(s"Error parsing request header. Our best guess of the apiKey is: $requestId", ex)
+        }
       } else
         null
-    val body: AbstractRequest =
+    val bodyAndSize: RequestAndSize =
       if (requestObj == null)
-        AbstractRequest.getRequest(header.apiKey, header.apiVersion, buffer)
+        try {
+          // For unsupported version of ApiVersionsRequest, create a dummy request to enable an error response to be returned later
+          if (header.apiKey == ApiKeys.API_VERSIONS.id && !Protocol.apiVersionSupported(header.apiKey, header.apiVersion)) {
+            new RequestAndSize(new ApiVersionsRequest.Builder().build(), 0)
+          }
+          else
+            AbstractRequest.getRequest(header.apiKey, header.apiVersion, buffer)
+        } catch {
+          case ex: Throwable =>
+            throw new InvalidRequestException(s"Error getting request for apiKey: ${header.apiKey} and apiVersion: ${header.apiVersion}", ex)
+        }
       else
         null
 
     buffer = null
-    private val requestLogger = Logger.getLogger("kafka.request.logger")
 
-    private def requestDesc(details: Boolean): String = {
+    def requestDesc(details: Boolean): String = {
       if (requestObj != null)
         requestObj.describe(details)
       else
-        header.toString + " -- " + body.toString
+        s"$header -- ${body[AbstractRequest].toString(details)}"
+    }
+
+    def body[T <: AbstractRequest](implicit classTag: ClassTag[T], nn: NotNothing[T]): T = {
+      bodyAndSize.request match {
+        case r: T => r
+        case r =>
+          throw new ClassCastException(s"Expected request with type ${classTag.runtimeClass}, but found ${r.getClass}")
+      }
     }
 
     trace("Processor %d received request : %s".format(processor, requestDesc(true)))
 
-    def updateRequestMetrics() {
-      val endTimeMs = SystemTime.milliseconds
-      // In some corner cases, apiLocalCompleteTimeMs may not be set when the request completes if the remote
+    def requestThreadTimeNanos = {
+      if (apiLocalCompleteTimeNanos == -1L) apiLocalCompleteTimeNanos = Time.SYSTEM.nanoseconds
+      math.max(apiLocalCompleteTimeNanos - requestDequeueTimeNanos, 0L)
+    }
+
+    def updateRequestMetrics(networkThreadTimeNanos: Long) {
+      val endTimeNanos = Time.SYSTEM.nanoseconds
+      // In some corner cases, apiLocalCompleteTimeNanos may not be set when the request completes if the remote
       // processing time is really small. This value is set in KafkaApis from a request handling thread.
       // This may be read in a network thread before the actual update happens in KafkaApis which will cause us to
-      // see a negative value here. In that case, use responseCompleteTimeMs as apiLocalCompleteTimeMs.
-      if (apiLocalCompleteTimeMs < 0)
-        apiLocalCompleteTimeMs = responseCompleteTimeMs
-      // If the apiRemoteCompleteTimeMs is not set (i.e., for requests that do not go through a purgatory), then it is
-      // the same as responseCompleteTimeMs.
-      if (apiRemoteCompleteTimeMs < 0)
-        apiRemoteCompleteTimeMs = responseCompleteTimeMs
+      // see a negative value here. In that case, use responseCompleteTimeNanos as apiLocalCompleteTimeNanos.
+      if (apiLocalCompleteTimeNanos < 0)
+        apiLocalCompleteTimeNanos = responseCompleteTimeNanos
+      // If the apiRemoteCompleteTimeNanos is not set (i.e., for requests that do not go through a purgatory), then it is
+      // the same as responseCompleteTimeNans.
+      if (apiRemoteCompleteTimeNanos < 0)
+        apiRemoteCompleteTimeNanos = responseCompleteTimeNanos
 
-      val requestQueueTime = (requestDequeueTimeMs - startTimeMs).max(0L)
-      val apiLocalTime = (apiLocalCompleteTimeMs - requestDequeueTimeMs).max(0L)
-      val apiRemoteTime = (apiRemoteCompleteTimeMs - apiLocalCompleteTimeMs).max(0L)
-      val apiThrottleTime = (responseCompleteTimeMs - apiRemoteCompleteTimeMs).max(0L)
-      val responseQueueTime = (responseDequeueTimeMs - responseCompleteTimeMs).max(0L)
-      val responseSendTime = (endTimeMs - responseDequeueTimeMs).max(0L)
-      val totalTime = endTimeMs - startTimeMs
-      var metricsList = List(RequestMetrics.metricsMap(ApiKeys.forId(requestId).name))
-      if (requestId == ApiKeys.FETCH.id) {
-        val isFromFollower = requestObj.asInstanceOf[FetchRequest].isFromFollower
-        metricsList ::= ( if (isFromFollower)
-                            RequestMetrics.metricsMap(RequestMetrics.followFetchMetricName)
-                          else
-                            RequestMetrics.metricsMap(RequestMetrics.consumerFetchMetricName) )
-      }
-      metricsList.foreach{
-        m => m.requestRate.mark()
-             m.requestQueueTimeHist.update(requestQueueTime)
-             m.localTimeHist.update(apiLocalTime)
-             m.remoteTimeHist.update(apiRemoteTime)
-             m.throttleTimeHist.update(apiThrottleTime)
-             m.responseQueueTimeHist.update(responseQueueTime)
-             m.responseSendTimeHist.update(responseSendTime)
-             m.totalTimeHist.update(totalTime)
+      def nanosToMs(nanos: Long) = math.max(TimeUnit.NANOSECONDS.toMillis(nanos), 0)
+
+      val requestQueueTime = nanosToMs(requestDequeueTimeNanos - startTimeNanos)
+      val apiLocalTime = nanosToMs(apiLocalCompleteTimeNanos - requestDequeueTimeNanos)
+      val apiRemoteTime = nanosToMs(apiRemoteCompleteTimeNanos - apiLocalCompleteTimeNanos)
+      val apiThrottleTime = nanosToMs(responseCompleteTimeNanos - apiRemoteCompleteTimeNanos)
+      val responseQueueTime = nanosToMs(responseDequeueTimeNanos - responseCompleteTimeNanos)
+      val responseSendTime = nanosToMs(endTimeNanos - responseDequeueTimeNanos)
+      val totalTime = nanosToMs(endTimeNanos - startTimeNanos)
+      val fetchMetricNames =
+        if (requestId == ApiKeys.FETCH.id) {
+          val isFromFollower = body[FetchRequest].isFromFollower
+          Seq(
+            if (isFromFollower) RequestMetrics.followFetchMetricName
+            else RequestMetrics.consumerFetchMetricName
+          )
+        }
+        else Seq.empty
+      val metricNames = fetchMetricNames :+ ApiKeys.forId(requestId).name
+      metricNames.foreach { metricName =>
+        val m = RequestMetrics.metricsMap(metricName)
+        m.requestRate.mark()
+        m.requestQueueTimeHist.update(requestQueueTime)
+        m.localTimeHist.update(apiLocalTime)
+        m.remoteTimeHist.update(apiRemoteTime)
+        m.throttleTimeHist.update(apiThrottleTime)
+        m.responseQueueTimeHist.update(responseQueueTime)
+        m.responseSendTimeHist.update(responseSendTime)
+        m.totalTimeHist.update(totalTime)
       }
 
-      if(requestLogger.isTraceEnabled)
-        requestLogger.trace("Completed request:%s from connection %s;totalTime:%d,requestQueueTime:%d,localTime:%d,remoteTime:%d,responseQueueTime:%d,sendTime:%d,securityProtocol:%s,principal:%s"
-          .format(requestDesc(true), connectionId, totalTime, requestQueueTime, apiLocalTime, apiRemoteTime, responseQueueTime, responseSendTime, securityProtocol, session.principal))
-      else if(requestLogger.isDebugEnabled)
-        requestLogger.debug("Completed request:%s from connection %s;totalTime:%d,requestQueueTime:%d,localTime:%d,remoteTime:%d,responseQueueTime:%d,sendTime:%d,securityProtocol:%s,principal:%s"
-          .format(requestDesc(false), connectionId, totalTime, requestQueueTime, apiLocalTime, apiRemoteTime, responseQueueTime, responseSendTime, securityProtocol, session.principal))
+      // Records network handler thread usage. This is included towards the request quota for the
+      // user/client. Throttling is only performed when request handler thread usage
+      // is recorded, just before responses are queued for delivery.
+      // The time recorded here is the time spent on the network thread for receiving this request
+      // and sending the response. Note that for the first request on a connection, the time includes
+      // the total time spent on authentication, which may be significant for SASL/SSL.
+      recordNetworkThreadTimeCallback.foreach(record => record(networkThreadTimeNanos))
+
+      if (requestLogger.isDebugEnabled) {
+        val detailsEnabled = requestLogger.isTraceEnabled
+        def nanosToMs(nanos: Long) = TimeUnit.NANOSECONDS.toMicros(math.max(nanos, 0)).toDouble / TimeUnit.MILLISECONDS.toMicros(1)
+        val totalTimeMs = nanosToMs(endTimeNanos - startTimeNanos)
+        val requestQueueTimeMs = nanosToMs(requestDequeueTimeNanos - startTimeNanos)
+        val apiLocalTimeMs = nanosToMs(apiLocalCompleteTimeNanos - requestDequeueTimeNanos)
+        val apiRemoteTimeMs = nanosToMs(apiRemoteCompleteTimeNanos - apiLocalCompleteTimeNanos)
+        val apiThrottleTimeMs = nanosToMs(responseCompleteTimeNanos - apiRemoteCompleteTimeNanos)
+        val responseQueueTimeMs = nanosToMs(responseDequeueTimeNanos - responseCompleteTimeNanos)
+        val responseSendTimeMs = nanosToMs(endTimeNanos - responseDequeueTimeNanos)
+        requestLogger.debug("Completed request:%s from connection %s;totalTime:%f,requestQueueTime:%f,localTime:%f,remoteTime:%f,throttleTime:%f,responseQueueTime:%f,sendTime:%f,securityProtocol:%s,principal:%s,listener:%s"
+          .format(requestDesc(detailsEnabled), connectionId, totalTimeMs, requestQueueTimeMs, apiLocalTimeMs, apiRemoteTimeMs, apiThrottleTimeMs, responseQueueTimeMs, responseSendTimeMs, securityProtocol, session.principal, listenerName.value))
+      }
     }
   }
 
-  case class Response(processor: Int, request: Request, responseSend: Send, responseAction: ResponseAction) {
-    request.responseCompleteTimeMs = SystemTime.milliseconds
+  object Response {
 
-    def this(processor: Int, request: Request, responseSend: Send) =
-      this(processor, request, responseSend, if (responseSend == null) NoOpAction else SendAction)
+    def apply(request: Request, responseSend: Send): Response = {
+      require(request != null, "request should be non null")
+      require(responseSend != null, "responseSend should be non null")
+      new Response(request, Some(responseSend), SendAction)
+    }
 
-    def this(request: Request, send: Send) =
-      this(request.processor, request, send)
+    def apply(request: Request, response: AbstractResponse): Response = {
+      require(request != null, "request should be non null")
+      require(response != null, "response should be non null")
+      apply(request, response.toSend(request.connectionId, request.header))
+    }
+
+  }
+
+  case class Response(request: Request, responseSend: Option[Send], responseAction: ResponseAction) {
+    request.responseCompleteTimeNanos = Time.SYSTEM.nanoseconds
+    if (request.apiLocalCompleteTimeNanos == -1L) request.apiLocalCompleteTimeNanos = Time.SYSTEM.nanoseconds
+
+    def processor: Int = request.processor
   }
 
   trait ResponseAction
@@ -211,20 +264,6 @@ class RequestChannel(val numProcessors: Int, val queueSize: Int) extends KafkaMe
       onResponse(response.processor)
   }
 
-  /** No operation to take for the request, need to read more over the network */
-  def noOperation(processor: Int, request: RequestChannel.Request) {
-    responseQueues(processor).put(new RequestChannel.Response(processor, request, null, RequestChannel.NoOpAction))
-    for(onResponse <- responseListeners)
-      onResponse(processor)
-  }
-
-  /** Close the connection for the request */
-  def closeConnection(processor: Int, request: RequestChannel.Request) {
-    responseQueues(processor).put(new RequestChannel.Response(processor, request, null, RequestChannel.CloseConnectionAction))
-    for(onResponse <- responseListeners)
-      onResponse(processor)
-  }
-
   /** Get the next request or block until specified time has elapsed */
   def receiveRequest(timeout: Long): RequestChannel.Request =
     requestQueue.poll(timeout, TimeUnit.MILLISECONDS)
@@ -237,7 +276,7 @@ class RequestChannel(val numProcessors: Int, val queueSize: Int) extends KafkaMe
   def receiveResponse(processor: Int): RequestChannel.Response = {
     val response = responseQueues(processor).poll()
     if (response != null)
-      response.request.responseDequeueTimeMs = SystemTime.milliseconds
+      response.request.responseDequeueTimeNanos = Time.SYSTEM.nanoseconds
     response
   }
 
@@ -246,7 +285,7 @@ class RequestChannel(val numProcessors: Int, val queueSize: Int) extends KafkaMe
   }
 
   def shutdown() {
-    requestQueue.clear
+    requestQueue.clear()
   }
 }
 
@@ -275,4 +314,3 @@ class RequestMetrics(name: String) extends KafkaMetricsGroup {
   val responseSendTimeHist = newHistogram("ResponseSendTimeMs", biased = true, tags)
   val totalTimeHist = newHistogram("TotalTimeMs", biased = true, tags)
 }
-

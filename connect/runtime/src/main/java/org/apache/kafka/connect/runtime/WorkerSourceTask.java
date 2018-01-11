@@ -1,37 +1,36 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with
+ * contributor license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright ownership.
  * The ASF licenses this file to You under the Apache License, Version 2.0
  * (the "License"); you may not use this file except in compliance with
- * the License.  You may obtain a copy of the License at
- * <p/>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p/>
+ * the License. You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- **/
-
+ */
 package org.apache.kafka.connect.runtime;
 
-import org.apache.kafka.common.KafkaException;
-import org.apache.kafka.common.errors.RetriableException;
-import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.clients.producer.Callback;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
+import org.apache.kafka.common.KafkaException;
+import org.apache.kafka.common.errors.RetriableException;
+import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.apache.kafka.connect.source.SourceTask;
 import org.apache.kafka.connect.storage.Converter;
 import org.apache.kafka.connect.storage.OffsetStorageReader;
 import org.apache.kafka.connect.storage.OffsetStorageWriter;
+import org.apache.kafka.connect.util.ConnectUtils;
 import org.apache.kafka.connect.util.ConnectorTaskId;
-import org.apache.kafka.connect.util.ShutdownableThread;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -47,20 +46,19 @@ import java.util.concurrent.TimeoutException;
 /**
  * WorkerTask that uses a SourceTask to ingest data into Kafka.
  */
-class WorkerSourceTask implements WorkerTask {
+class WorkerSourceTask extends WorkerTask {
     private static final Logger log = LoggerFactory.getLogger(WorkerSourceTask.class);
 
     private static final long SEND_FAILED_BACKOFF_MS = 100;
 
-    private final ConnectorTaskId id;
+    private final WorkerConfig workerConfig;
     private final SourceTask task;
     private final Converter keyConverter;
     private final Converter valueConverter;
+    private final TransformationChain<SourceRecord> transformationChain;
     private KafkaProducer<byte[], byte[]> producer;
-    private WorkerSourceTaskThread workThread;
     private final OffsetStorageReader offsetReader;
     private final OffsetStorageWriter offsetWriter;
-    private final WorkerConfig workerConfig;
     private final Time time;
 
     private List<SourceRecord> toSend;
@@ -73,19 +71,33 @@ class WorkerSourceTask implements WorkerTask {
     private boolean flushing;
     private CountDownLatch stopRequestedLatch;
 
-    public WorkerSourceTask(ConnectorTaskId id, SourceTask task,
-                            Converter keyConverter, Converter valueConverter,
+    private Map<String, String> taskConfig;
+    private boolean finishedStart = false;
+    private boolean startedShutdownBeforeStartCompleted = false;
+
+    public WorkerSourceTask(ConnectorTaskId id,
+                            SourceTask task,
+                            TaskStatus.Listener statusListener,
+                            TargetState initialState,
+                            Converter keyConverter,
+                            Converter valueConverter,
+                            TransformationChain<SourceRecord> transformationChain,
                             KafkaProducer<byte[], byte[]> producer,
-                            OffsetStorageReader offsetReader, OffsetStorageWriter offsetWriter,
-                            WorkerConfig workerConfig, Time time) {
-        this.id = id;
+                            OffsetStorageReader offsetReader,
+                            OffsetStorageWriter offsetWriter,
+                            WorkerConfig workerConfig,
+                            ClassLoader loader,
+                            Time time) {
+        super(id, statusListener, initialState, loader);
+
+        this.workerConfig = workerConfig;
         this.task = task;
         this.keyConverter = keyConverter;
         this.valueConverter = valueConverter;
+        this.transformationChain = transformationChain;
         this.producer = producer;
         this.offsetReader = offsetReader;
         this.offsetWriter = offsetWriter;
-        this.workerConfig = workerConfig;
         this.time = time;
 
         this.toSend = null;
@@ -97,37 +109,74 @@ class WorkerSourceTask implements WorkerTask {
     }
 
     @Override
-    public void start(Map<String, String> props) {
-        workThread = new WorkerSourceTaskThread("WorkerSourceTask-" + id, props);
-        workThread.start();
+    public void initialize(TaskConfig taskConfig) {
+        try {
+            this.taskConfig = taskConfig.originalsStrings();
+        } catch (Throwable t) {
+            log.error("Task {} failed initialization and will not be started.", t);
+            onFailure(t);
+        }
+    }
+
+    protected void close() {
+        producer.close(30, TimeUnit.SECONDS);
+        transformationChain.close();
     }
 
     @Override
     public void stop() {
-        if (workThread != null) {
-            workThread.startGracefulShutdown();
-            stopRequestedLatch.countDown();
+        super.stop();
+        stopRequestedLatch.countDown();
+        synchronized (this) {
+            if (finishedStart)
+                task.stop();
+            else
+                startedShutdownBeforeStartCompleted = true;
         }
     }
 
     @Override
-    public boolean awaitStop(long timeoutMs) {
-        boolean success = true;
-        if (workThread != null) {
-            try {
-                success = workThread.awaitShutdown(timeoutMs, TimeUnit.MILLISECONDS);
-                if (!success)
-                    workThread.forceShutdown();
-            } catch (InterruptedException e) {
-                success = false;
+    public void execute() {
+        try {
+            task.initialize(new WorkerSourceTaskContext(offsetReader));
+            task.start(taskConfig);
+            log.info("Source task {} finished initialization and start", this);
+            synchronized (this) {
+                if (startedShutdownBeforeStartCompleted) {
+                    task.stop();
+                    return;
+                }
+                finishedStart = true;
             }
-        }
-        return success;
-    }
 
-    @Override
-    public void close() {
-        // Nothing to do
+            while (!isStopping()) {
+                if (shouldPause()) {
+                    onPause();
+                    if (awaitUnpause()) {
+                        onResume();
+                    }
+                    continue;
+                }
+
+                if (toSend == null) {
+                    log.trace("Nothing to send to Kafka. Polling source for additional records");
+                    toSend = task.poll();
+                }
+                if (toSend == null)
+                    continue;
+                log.debug("About to send " + toSend.size() + " records to Kafka");
+                if (!sendRecords())
+                    stopRequestedLatch.await(SEND_FAILED_BACKOFF_MS, TimeUnit.MILLISECONDS);
+            }
+        } catch (InterruptedException e) {
+            // Ignore and allow to exit.
+        } finally {
+            // It should still be safe to commit offsets since any exception would have
+            // simply resulted in not getting more records but all the existing records should be ok to flush
+            // and commit offsets. Worst case, task.flush() will also throw an exception causing the offset commit
+            // to fail.
+            commitOffsets();
+        }
     }
 
     /**
@@ -137,10 +186,18 @@ class WorkerSourceTask implements WorkerTask {
      */
     private boolean sendRecords() {
         int processed = 0;
-        for (final SourceRecord record : toSend) {
+        for (final SourceRecord preTransformRecord : toSend) {
+            final SourceRecord record = transformationChain.apply(preTransformRecord);
+
+            if (record == null) {
+                commitTaskRecord(preTransformRecord);
+                continue;
+            }
+
             byte[] key = keyConverter.fromConnectData(record.topic(), record.keySchema(), record.key());
             byte[] value = valueConverter.fromConnectData(record.topic(), record.valueSchema(), record.value());
-            final ProducerRecord<byte[], byte[]> producerRecord = new ProducerRecord<>(record.topic(), record.kafkaPartition(), key, value);
+            final ProducerRecord<byte[], byte[]> producerRecord = new ProducerRecord<>(record.topic(), record.kafkaPartition(),
+                    ConnectUtils.checkAndConvertTimestamp(record.timestamp()), key, value);
             log.trace("Appending record with key {}, value {}", record.key(), record.value());
             // We need this queued first since the callback could happen immediately (even synchronously in some cases).
             // Because of this we need to be careful about handling retries -- we always save the previously attempted
@@ -158,6 +215,7 @@ class WorkerSourceTask implements WorkerTask {
                 }
             }
             try {
+                final String topic = producerRecord.topic();
                 producer.send(
                         producerRecord,
                         new Callback() {
@@ -169,14 +227,13 @@ class WorkerSourceTask implements WorkerTask {
                                     // timeouts, callbacks with exceptions should never be invoked in practice. If the
                                     // user overrode these settings, the best we can do is notify them of the failure via
                                     // logging.
-                                    log.error("{} failed to send record to {}: {}", id, record.topic(), e);
-                                    log.debug("Failed record: topic {}, Kafka partition {}, key {}, value {}, source offset {}, source partition {}",
-                                            record.topic(), record.kafkaPartition(), record.key(), record.value(),
-                                            record.sourceOffset(), record.sourcePartition());
+                                    log.error("{} failed to send record to {}: {}", id, topic, e);
+                                    log.debug("Failed record: {}", preTransformRecord);
                                 } else {
                                     log.trace("Wrote record successfully: topic {} partition {} offset {}",
                                             recordMetadata.topic(), recordMetadata.partition(),
                                             recordMetadata.offset());
+                                    commitTaskRecord(preTransformRecord);
                                 }
                                 recordSent(producerRecord);
                             }
@@ -194,6 +251,16 @@ class WorkerSourceTask implements WorkerTask {
         }
         toSend = null;
         return true;
+    }
+
+    private void commitTaskRecord(SourceRecord record) {
+        try {
+            task.commitRecord(record);
+        } catch (InterruptedException e) {
+            log.error("Exception thrown", e);
+        } catch (Throwable t) {
+            log.error("Exception thrown while calling task.commitRecord()", t);
+        }
     }
 
     private synchronized void recordSent(final ProducerRecord<byte[], byte[]> record) {
@@ -236,9 +303,7 @@ class WorkerSourceTask implements WorkerTask {
                 try {
                     long timeoutMs = timeout - time.milliseconds();
                     if (timeoutMs <= 0) {
-                        log.error(
-                                "Failed to flush {}, timed out while waiting for producer to flush outstanding "
-                                        + "messages, {} left ({})", this, outstandingMessages.size(), outstandingMessages);
+                        log.error("Failed to flush {}, timed out while waiting for producer to flush outstanding {} messages", this, outstandingMessages.size());
                         finishFailedFlush();
                         return false;
                     }
@@ -261,6 +326,8 @@ class WorkerSourceTask implements WorkerTask {
                 finishSuccessfulFlush();
                 log.debug("Finished {} offset commitOffsets successfully in {} ms",
                         this, time.milliseconds() - started);
+
+                commitSourceTask();
                 return true;
             }
         }
@@ -305,7 +372,20 @@ class WorkerSourceTask implements WorkerTask {
         finishSuccessfulFlush();
         log.info("Finished {} commitOffsets successfully in {} ms",
                 this, time.milliseconds() - started);
+
+        commitSourceTask();
+
         return true;
+    }
+
+    private void commitSourceTask() {
+        try {
+            this.task.commit();
+        } catch (InterruptedException ex) {
+            log.warn("Commit interrupted", ex);
+        } catch (Throwable t) {
+            log.error("Exception thrown while calling task.commit()", t);
+        }
     }
 
     private synchronized void finishFailedFlush() {
@@ -321,67 +401,6 @@ class WorkerSourceTask implements WorkerTask {
         outstandingMessages = outstandingMessagesBacklog;
         outstandingMessagesBacklog = temp;
         flushing = false;
-    }
-
-
-    private class WorkerSourceTaskThread extends ShutdownableThread {
-        private Map<String, String> workerProps;
-        private boolean finishedStart;
-        private boolean startedShutdownBeforeStartCompleted;
-
-        public WorkerSourceTaskThread(String name, Map<String, String> workerProps) {
-            super(name);
-            this.workerProps = workerProps;
-            this.finishedStart = false;
-            this.startedShutdownBeforeStartCompleted = false;
-        }
-
-        @Override
-        public void execute() {
-            try {
-                task.initialize(new WorkerSourceTaskContext(offsetReader));
-                task.start(workerProps);
-                log.info("Source task {} finished initialization and start", this);
-                synchronized (this) {
-                    if (startedShutdownBeforeStartCompleted) {
-                        task.stop();
-                        return;
-                    }
-                    finishedStart = true;
-                }
-
-                while (getRunning()) {
-                    if (toSend == null)
-                        toSend = task.poll();
-                    if (toSend == null)
-                        continue;
-                    if (!sendRecords())
-                        stopRequestedLatch.await(SEND_FAILED_BACKOFF_MS, TimeUnit.MILLISECONDS);
-                }
-            } catch (InterruptedException e) {
-                // Ignore and allow to exit.
-            } catch (Throwable t) {
-                log.error("Task {} threw an uncaught and unrecoverable exception", id);
-                log.error("Task is being killed and will not recover until manually restarted:", t);
-                // It should still be safe to let this fall through and commit offsets since this exception would have
-                // simply resulted in not getting more records but all the existing records should be ok to flush
-                // and commit offsets. Worst case, task.flush() will also throw an exception causing the offset commit
-                // to fail.
-            }
-
-            commitOffsets();
-        }
-
-        @Override
-        public void startGracefulShutdown() {
-            super.startGracefulShutdown();
-            synchronized (this) {
-                if (finishedStart)
-                    task.stop();
-                else
-                    startedShutdownBeforeStartCompleted = true;
-            }
-        }
     }
 
     @Override

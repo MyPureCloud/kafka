@@ -18,6 +18,7 @@
 package kafka.server
 
 import kafka.common.TopicAndPartition
+import org.apache.kafka.common.TopicPartition
 
 /**
  * Keys used for delayed operation metrics recording
@@ -33,7 +34,7 @@ object DelayedOperationKey {
 /* used by delayed-produce and delayed-fetch operations */
 case class TopicPartitionOperationKey(topic: String, partition: Int) extends DelayedOperationKey {
 
-  def this(topicAndPartition: TopicAndPartition) = this(topicAndPartition.topic, topicAndPartition.partition)
+  def this(topicPartition: TopicPartition) = this(topicPartition.topic, topicPartition.partition)
 
   override def keyLabel = "%s-%d".format(topic, partition)
 }
@@ -48,4 +49,10 @@ case class MemberKey(groupId: String, consumerId: String) extends DelayedOperati
 case class GroupKey(groupId: String) extends DelayedOperationKey {
 
   override def keyLabel = groupId
+}
+
+/* used by delayed-topic operations */
+case class TopicKey(topic: String) extends DelayedOperationKey {
+
+  override def keyLabel = topic
 }
