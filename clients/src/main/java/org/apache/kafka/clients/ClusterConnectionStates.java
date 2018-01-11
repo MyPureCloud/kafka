@@ -16,6 +16,8 @@
  */
 package org.apache.kafka.clients;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.HashMap;
 import java.util.Map;
@@ -36,6 +38,27 @@ final class ClusterConnectionStates {
         this.reconnectBackoffMaxMs = reconnectBackoffMaxMs;
         this.reconnectBackoffMaxExp = Math.log(this.reconnectBackoffMaxMs / (double) Math.max(reconnectBackoffMs, 1)) / Math.log(RECONNECT_BACKOFF_EXP_BASE);
         this.nodeState = new HashMap<>();
+    }
+
+    /**
+     * The default TCP socket timeout is way too long for broker connection
+     * attempts, so instead timeout connection attempts using request timeout
+     * just like requests.
+     * @param now
+     * @param requestTimeout
+     * @return
+     */
+    public List<String> getNodesWithTimedOutConnects(long now, int requestTimeout) {
+        List<String> result = new ArrayList<>();
+
+        for (Map.Entry<String, NodeConnectionState> entry : nodeState.entrySet()) {
+            long timeSinceConnectAttempt = now - entry.getValue().lastConnectAttemptMs;
+            if (entry.getValue().state == ConnectionState.CONNECTING && timeSinceConnectAttempt > requestTimeout) {
+                result.add(entry.getKey());
+            }
+        }
+
+        return result;
     }
 
     /**
