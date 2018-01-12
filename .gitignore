@@ -33,7 +33,6 @@ config/server-*
 config/zookeeper-*
 core/data/*
 gradle/wrapper/*
-gradlew
 gradlew.bat
 
 results
